@@ -1,0 +1,21 @@
+Deep Learning Programming Test I
+================================
+
+In this test we are looking for you to train a neural network to take two
+square images and output the angle by which the first image has been rotated to
+produce the second. All pairs of input images are to be of the same
+scale, with rotation carried out about the centre of the image.
+
+You are expected to form your own dataset for training and testing of this task
+from public datasets/images/videos.
+
+Your model will also be tested on an undisclosed private dataset.
+
+Please send us all training code, and an inference program for testing (this
+program should take two JPEG or PNG images as commandline arguments and output
+a single floating point angle.
+
+All code is expected to be in Python or C++ and run on Linux.
+
+You will be asked about your training methodology and network design in your
+interview as well as how you might improve your network/model.

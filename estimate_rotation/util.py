@@ -1,7 +1,9 @@
 import numpy
 from scipy.ndimage.interpolation import zoom, rotate as imrot
+from math import floor
 
 from keras.preprocessing.image import apply_affine_transform
+from keras import backend as K
 
 
 def show(img, rot):
@@ -146,3 +148,158 @@ def rot_scale_crop(img, rot_deg, zoom_img, zoom_rot, mode, cval, out_img, out_ro
     out_rot[...] = crop_center_square(rot, out_rot.shape[1])
 
     show(out_img, out_rot)
+
+
+rgb2y = numpy.array([.299, .587, .114])
+
+imagenet_mean_rgb_01 = numpy.array([0.485, 0.456, 0.406])
+imagenet_std_rgb_01 = numpy.array([0.229, 0.224, 0.225])
+
+imagenet_mean_y_01 = numpy.dot(rgb2y, imagenet_mean_rgb_01)
+
+# we don't know the covariances of r, g and b across the dataset, so we consider them 0, and hope for a decent
+# approximation
+imagenet_std_y_01 = numpy.linalg.norm(imagenet_std_rgb_01 * rgb2y)
+
+
+def to_grayscale_inplace(rgb_batch, image_data_format=K.image_data_format()):
+    """
+    !!! modifies input rgb_batch
+    """
+    assert rgb_batch.ndim in {3, 4}
+    channel_axis = -3 if image_data_format == 'channels_first' else -1
+    shape = [1] * rgb_batch.ndim
+    shape[channel_axis] = 3
+    rgb_batch *= rgb2y.reshape(shape)
+    return rgb_batch.sum(axis=channel_axis)
+
+
+def preprocess_input(img, image_data_format=K.image_data_format()):
+    # it would be nice to apply per-image mean-subtraction and standardization, but we'd have to recompute the mean and
+    # std for normalized images, which is pretty time consuming, so, for the moment, we're using the mean and std from
+    # imagenet and hope they are close to our images' statistics
+    # TODO: compute per channel mean and std of pixels across entire dataset after per-image standardization
+
+    # we'll probably use relu activations, so He is better than Xavier. In the He init scheme, inputs are assumed to be
+    # the distributed according to the positive part of a gaussian with mean 0 and std 1. That's why we prefer inputs
+    # between 0 and 1, rather than -1 and 1 (which are good for sigmoid + xavier)
+    if img.ndim == 2:
+        mean = imagenet_mean_y_01
+        std = imagenet_std_y_01
+    else:
+        channel_axis = -3 if image_data_format == 'channels_first' else -1
+        if img.ndim == 4 and img.shape[channel_axis] == 1:
+            # we're dealing with a batch of grayscale images
+            mean = imagenet_mean_y_01
+            std = imagenet_std_y_01
+        else:
+            assert img.shape[channel_axis] == 3
+            mean_shape = [1] * img.ndim
+            mean_shape[channel_axis] = 3
+
+            mean = imagenet_mean_rgb_01.reshape(mean_shape)
+            std = imagenet_std_rgb_01.reshape(mean_shape)
+
+    return (img / 255. - mean) / std
+
+
+def encode_angle(deg, angle_encoding, resolution=None):
+    from estimate_rotation.common import AngleEncoding
+    assert angle_encoding in AngleEncoding
+    rad = deg * numpy.pi / 180
+
+    if angle_encoding == AngleEncoding.DEGREES:
+        return deg
+    elif angle_encoding == AngleEncoding.RADIANS:
+        return rad
+    elif angle_encoding == AngleEncoding.UNIT:
+        return deg / 180.
+    elif angle_encoding == AngleEncoding.SINCOS:
+        return numpy.sin(rad), numpy.cos(rad)
+    elif angle_encoding == AngleEncoding.CLASSES:
+        return int(floor((rad + numpy.pi) / resolution))
+    else:
+        raise NotImplementedError()
+
+
+def decode_angle(angle_encoded, angle_encoding):
+    from estimate_rotation.common import AngleEncoding
+    if angle_encoding == AngleEncoding.DEGREES:
+        return angle_encoded
+    elif angle_encoding == AngleEncoding.RADIANS:
+        return angle_encoded * (180 / numpy.pi)
+    elif angle_encoding == AngleEncoding.UNIT:
+        return angle_encoded * 180
+    elif angle_encoding == AngleEncoding.SINCOS:
+        return numpy.arctan2(angle_encoded[1], angle_encoded[0]) * (180 / numpy.pi)
+    elif angle_encoding == AngleEncoding.CLASSES:
+        resolution = 360. / len(angle_encoded)
+        return -180 + numpy.argmax(angle_encoded) * resolution + resolution / 2.
+
+
+def encode_angles_inplace(angles, angle_encoding, resolution=None):
+    """
+    !!! modifies input angles_deg
+    """
+    from estimate_rotation.common import AngleEncoding
+    assert angle_encoding in AngleEncoding
+
+    if angle_encoding == AngleEncoding.DEGREES:
+        return angles
+
+    if angle_encoding == AngleEncoding.UNIT:
+        angles /= 180.
+        return angles
+
+    # convert to radians
+    angles *= numpy.pi / 180
+
+    if angle_encoding == AngleEncoding.RADIANS:
+        return angles
+
+    if angle_encoding == AngleEncoding.SINCOS:
+        return numpy.vstack((numpy.sin(angles), numpy.cos(angles))).T
+
+    if angle_encoding == AngleEncoding.CLASSES:
+        return numpy.floor((angles + numpy.pi) / resolution).astype(int)
+
+    raise NotImplementedError()
+
+
+def generate_static(imgdir, outdir, img_side, batch_size):
+    from estimate_rotation.common import AngleEncoding
+    from estimate_rotation.dataset import AugmentingDirectoryIterator
+    """
+    rotates, zooms and crops all images in imgdir by random rotations and writes them to outdir; it also generates
+    a file in outdir containing the angles for each image; choose a batch size that is a divisor of the number of images
+    in imgdir.
+    """
+    ds = AugmentingDirectoryIterator(imgdir, img_side, grayscale=False, angle_encoding=AngleEncoding.DEGREES,
+                                     n_classes=1, batch_size=batch_size, shuffle=False, seed=None, outdir=outdir)
+
+    # go once through the whole dataset to write in the dirs
+    for batch_idx in range(len(ds)):
+        _ = ds[batch_idx]
+
+    ds.angle_file.close()
+
+
+def load_as_nparr(static_dir):
+    from estimate_rotation.common import AngleEncoding
+    from estimate_rotation.dataset import StaticDirectoryIterator
+    ds = StaticDirectoryIterator(static_dir, preproc=None, angle_encoding=AngleEncoding.DEGREES,
+                                 n_classes=None, batch_size=1, shuffle=False, seed=None,
+                                 image_data_format=K.image_data_format())
+    ds.batch_size = len(ds)
+    return ds[0]
+
+
+def batch_rgb2y(rgb_batch, image_data_format=K.image_data_format()):
+    if image_data_format == 'channels_first':
+        rgb_batch = numpy.moveaxis(rgb_batch, 1, 3)
+
+    y_batch = rgb_batch.reshape(-1, 3).dot(rgb2y).reshape(rgb_batch.shape[:-1] + (1,))
+
+    if image_data_format == 'channels_first':
+        y_batch = numpy.moveaxis(y_batch, 3, 1)
+    return y_batch

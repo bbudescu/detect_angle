@@ -1,48 +1,22 @@
+from enum import Enum, unique, auto
 import numpy
 from math import ceil, floor
 from glob import glob
 import os
+from scipy.misc import imsave
 
 from keras.preprocessing.image import Iterator as DatasetIterator, load_img
 from keras import backend as K
 
 from estimate_rotation.common import AngleEncoding
+from estimate_rotation.util import preprocess_input
 
-rgb2y = numpy.array([.299, .587, .114])
-
-imagenet_mean_rgb_01 = numpy.array([0.485, 0.456, 0.406])
-imagenet_std_rgb_01 = numpy.array([0.229, 0.224, 0.225])
-
-imagenet_mean_y_01 = numpy.dot(rgb2y, imagenet_mean_rgb_01)
-
-# we don't know the covariances of r, g and b across the dataset, so we consider them 0, and hope for a decent
-# approximation
-imagenet_std_y_01 = numpy.linalg.norm(imagenet_std_rgb_01 * rgb2y)
-
-
-def custom_preproc(img, image_data_format=K.image_data_format()):
-    # it would be nice to apply per-image mean-subtraction and standardization, but we'd have to recompute the mean and
-    # std for normalized images, which is pretty time consuming, so, for the moment, we're using the mean and std from
-    # imagenet and hope they are close to our images' statistics
-    # TODO: compute per channel mean and std of pixels across entire dataset after per-image standardization
-
-    # we'll probably use relu activations, so He is better than Xavier. In the He init scheme, inputs are assumed to be
-    # the distributed according to the positive part of a gaussian with mean 0 and std 1. That's why we prefer inputs
-    # between 0 and 1, rather than -1 and 1 (which are good for sigmoid + xavier)
-    if img.ndim == 2:
-        mean = imagenet_mean_y_01
-        std = imagenet_std_y_01
-    else:
-        assert img.ndim == 3
-        channel_axis = 0 if image_data_format == 'channels_first' else -1
-        assert img.shape[channel_axis] == 3
-        mean_shape = [1, 1, 1]
-        mean_shape[channel_axis] = 3
-
-        mean = imagenet_mean_rgb_01.reshape(mean_shape)
-        std = imagenet_std_rgb_01.reshape(mean_shape)
-
-    return (img / 255. - mean) / std
+@unique
+class DatasetSize(Enum):
+    TINY = auto()
+    SMALL = auto()
+    MEDIUM = auto()
+    ALL = auto()
 
 
 def genrot(img, out_img, out_rot, out_format=K.image_data_format()):
@@ -118,6 +92,7 @@ def genrot(img, out_img, out_rot, out_format=K.image_data_format()):
             out_rot = numpy.moveaxis(out_rot, 2, 0)
     else:
         assert img.ndim == 2
+        # remove dummy dim
         out_img = out_img[0 if out_format == 'channels_first' else -1]
         out_rot = out_rot[0 if out_format == 'channels_first' else -1]
 
@@ -136,70 +111,121 @@ def genrot(img, out_img, out_rot, out_format=K.image_data_format()):
 
 
 class DirectoryIterator(DatasetIterator):
-    """
-    similar to keras.preprocessing.image.DirectoryIterator, but does not assume per-class subdirectories
-    """
-    def __init__(self, directory, img_sidelen=256, grayscale=False, preproc=custom_preproc,
-                 angle_encoding=AngleEncoding.SINCOS, n_classes=720, batch_size=32,  shuffle=True, seed=None,
-                 image_data_format=K.image_data_format()):
-
-        assert image_data_format in {'channels_first', 'channels_last'}
-        assert angle_encoding in AngleEncoding
-
-        self.data_format = image_data_format
-        self.filenames = glob(os.path.join(directory, '*'))
+    def __init__(self, grayscale, preproc, angle_encoding, n_classes, n, batch_size, shuffle, seed, image_data_format,
+                 img_side):
         self.grayscale = grayscale
         self.preproc = preproc
         self.angle_encoding = angle_encoding
-
-        if angle_encoding == AngleEncoding.CLASSES:
-            self.n_classes = n_classes
-            self.angle_resolution = 2 * numpy.pi / self.n_classes
+        self.data_format = image_data_format
 
         n_channels = 1 if self.grayscale else 3
 
         if self.data_format == 'channels_last':
-            self.image_shape = (img_sidelen, img_sidelen, n_channels)
+            self.image_shape = (img_side, img_side, n_channels)
         else:
-            self.image_shape = (n_channels, img_sidelen, img_sidelen)
+            self.image_shape = (n_channels, img_side, img_side)
 
-        super(DirectoryIterator, self).__init__(len(self.filenames), batch_size, shuffle, seed)
+        if angle_encoding == AngleEncoding.CLASSES:
+            self.n_classes = n_classes
+            self.angle_resolution = 2 * numpy.pi / self.n_classes
+        else:
+            self.angle_resolution = None
 
-    def _get_batches_of_transformed_samples(self, index_array):
-        # note: np.random seed is set to initial seed + total_batches_seen at each batch
-        batch_img = numpy.empty((len(index_array),) + self.image_shape, dtype=K.floatx())
+        super(DirectoryIterator, self).__init__(n, batch_size, shuffle, seed)
+
+    def allocate_batches(self, batch_size):
+        batch_img = numpy.empty((batch_size,) + self.image_shape, dtype=K.floatx())
         batch_rot = numpy.empty_like(batch_img)
 
         if self.angle_encoding in {AngleEncoding.DEGREES, AngleEncoding.RADIANS, AngleEncoding.UNIT}:
-            batch_y = numpy.empty(len(index_array), K.floatx())
+            batch_y = numpy.empty(batch_size, K.floatx())
         elif self.angle_encoding == AngleEncoding.SINCOS:
-            batch_y = numpy.empty((len(index_array), 2), K.floatx())
+            batch_y = numpy.empty((batch_size, 2), K.floatx())
         elif self.angle_encoding == AngleEncoding.CLASSES:
-            batch_y = numpy.zeros((len(index_array), self.n_classes), K.floatx())
+            batch_y = numpy.zeros((batch_size, self.n_classes), K.floatx())
         else:
             raise NotImplementedError()
 
-        for o, i in enumerate(index_array):
-            img = numpy.asarray(load_img(self.filenames[i], self.grayscale))
-            if self.preproc:
-                img = self.preproc(img, 'channels_last')
+        return batch_img, batch_rot, batch_y
 
-            angle_deg = genrot(img, batch_img[o], batch_rot[o], self.data_format)
+    def proc(self, batch_img, batch_rot, batch_y, angles_deg):
+        from estimate_rotation.util import encode_angle
+        if self.preproc:
+            batch_img[...] = self.preproc(batch_img, self.data_format)
+            batch_rot[...] = self.preproc(batch_rot, self.data_format)
 
-            angle_rad = angle_deg * numpy.pi / 180
+        for o, angle_deg in enumerate(angles_deg):
+            angle_enc = encode_angle(angle_deg, self.angle_encoding, self.angle_resolution)
 
-            if self.angle_encoding == AngleEncoding.DEGREES:
-                batch_y[o] = angle_deg
-            elif self.angle_encoding == AngleEncoding.RADIANS:
-                batch_y[o] = angle_rad
-            elif self.angle_encoding == AngleEncoding.UNIT:
-                batch_y[o] = angle_deg / 180
-            elif self.angle_encoding == AngleEncoding.SINCOS:
-                batch_y[o] = numpy.sin(angle_rad), numpy.cos(angle_rad)
-            elif self.angle_encoding == AngleEncoding.CLASSES:
-                batch_y[o, int(floor((angle_rad + numpy.pi) / self.angle_resolution))] = True
+            if self.angle_encoding == AngleEncoding.CLASSES:
+                batch_y[o, angle_enc] = True
             else:
-                raise NotImplementedError()
+                batch_y[o] = angle_enc
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        raise NotImplementedError()
+
+
+class AugmentingDirectoryIterator(DirectoryIterator):
+    """
+    similar to keras.preprocessing.image.DirectoryIterator, but does not assume per-class subdirectories
+    """
+    def __init__(self, directory, img_sidelen=256, grayscale=False, preproc=preprocess_input,
+                 angle_encoding=AngleEncoding.SINCOS, n_classes=720, batch_size=32, shuffle=True, seed=None,
+                 image_data_format=K.image_data_format(), outdir=None):
+
+        assert image_data_format in {'channels_first', 'channels_last'}
+        assert angle_encoding in AngleEncoding
+
+        self.filenames = sorted(glob(os.path.join(directory, '*')))
+
+        self.outdir = outdir
+
+        if self.outdir:
+            self.img_outdir = os.path.join(self.outdir, 'img')
+            if not os.path.exists(self.img_outdir):
+                os.makedirs(self.img_outdir)
+
+            self.rot_outdir = os.path.join(self.outdir, 'rot')
+            if not os.path.exists(self.rot_outdir):
+                os.makedirs(self.rot_outdir)
+
+            self.angle_file = open(os.path.join(self.outdir, 'rot.csv'), 'wt')
+
+        super(AugmentingDirectoryIterator, self).__init__(grayscale, preproc, angle_encoding, n_classes,
+                                                          len(self.filenames), batch_size, shuffle, seed,
+                                                          image_data_format, img_sidelen)
+
+    def __del__(self):
+        if self.outdir:
+            self.angle_file.close()
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        batch_img, batch_rot, batch_y = self.allocate_batches(len(index_array))
+        # note: np.random seed is set to initial seed + total_batches_seen at each batch
+        angles_deg = []
+        for o, i in enumerate(index_array):
+            input_filename = self.filenames[i]
+            img = numpy.asarray(load_img(input_filename, self.grayscale))
+            angle_deg = genrot(img, batch_img[o], batch_rot[o], self.data_format)
+            angles_deg.append(angle_deg)
+
+            if self.outdir:
+                filename = os.path.basename(input_filename)
+
+                out_img = batch_img[o]
+                if self.data_format == 'channels_first':
+                    out_img = numpy.moveaxis(out_img, 0, 2)
+                imsave(os.path.join(self.img_outdir, filename), out_img)
+
+                out_rot = batch_rot[o]
+                if self.data_format == 'channels_first':
+                    out_rot = numpy.moveaxis(out_rot, 0, 2)
+                imsave(os.path.join(self.rot_outdir, filename), out_rot)
+
+                self.angle_file.write(filename + ', ' + str(angle_deg) + '\n')
+
+        self.proc(batch_img, batch_rot, batch_y, angles_deg)
 
         return [batch_img, batch_rot], batch_y
 
@@ -216,10 +242,196 @@ class DirectoryIterator(DatasetIterator):
         return self._get_batches_of_transformed_samples(index_array)
 
 
+class StaticDirectoryIterator(DirectoryIterator):
+    """
+    it's easier to observe progress when the training set doesn't change at every epoch; we turn on the random
+    augmentation only when we observe overfitting
+    """
+    def __init__(self, directory, preproc, angle_encoding, n_classes, batch_size, shuffle, seed, image_data_format):
+        self.imgdir = os.path.join(directory, 'img')
+        assert os.path.exists(self.imgdir)
+        assert os.path.isdir(self.imgdir)
+
+        self.rotdir = os.path.join(directory, 'rot')
+        assert os.path.exists(self.rotdir)
+        assert os.path.isdir(self.rotdir)
+        
+        angle_filename = os.path.join(directory, 'rot.csv')
+        assert os.path.exists(angle_filename)
+        assert os.path.isfile(angle_filename)
+
+        self.filenames = []
+        self.angles = []
+        with open(angle_filename, 'rt') as angle_file:
+            for line in angle_file.readlines():
+                filename, angle = line.split(',')
+                self.filenames.append(filename)
+                self.angles.append(float(angle))
+
+        assert [os.path.basename(filename) for filename in sorted(glob(os.path.join(self.imgdir, '*')))] == self.filenames
+        assert [os.path.basename(filename) for filename in sorted(glob(os.path.join(self.rotdir, '*')))] == self.filenames
+
+        # read an image to get its shape
+        img = numpy.asarray(load_img(os.path.join(self.imgdir, self.filenames[0])))
+
+        grayscale = img.ndim == 2
+
+        if not grayscale:
+            assert img.ndim == 3
+            assert img.shape[2] == 3
+
+        assert img.shape[0] == img.shape[1]
+
+        img_side = len(img)
+
+        super(StaticDirectoryIterator, self).__init__(grayscale, preproc, angle_encoding, n_classes,
+                                                      len(self.filenames), batch_size, shuffle, seed, image_data_format,
+                                                      img_side)
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        batch_img, batch_rot, batch_y = self.allocate_batches(len(index_array))
+        angles_deg = []
+        for o, i in enumerate(index_array):
+            img = numpy.asarray(load_img(os.path.join(self.imgdir, self.filenames[i])))
+            rot = numpy.asarray(load_img(os.path.join(self.rotdir, self.filenames[i])))
+            if self.data_format == 'channels_first':
+                img = numpy.moveaxis(img, 2, 0)
+                rot = numpy.moveaxis(rot, 2, 0)
+            batch_img[o] = img
+            batch_rot[o] = rot
+            angles_deg.append(self.angles[i])
+        self.proc(batch_img, batch_rot, batch_y, angles_deg)
+        return [batch_img, batch_rot], batch_y
+
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        with self.lock:
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
+
+
+def datasets(dataset_dir, dataset_name, dataset_size, dataset_static, dataset_inmem,
+             # parameters passed to {Augmenting, Static}DirectoryIterator constructors:
+             img_sidelen, grayscale, preproc, angle_encoding, n_classes, batch_size, shuffle, seed, image_data_format):
+    from estimate_rotation.common import AngleEncoding
+    from estimate_rotation.util import load_as_nparr, encode_angles_inplace, batch_rgb2y
+
+    if dataset_size == DatasetSize.ALL:
+        assert not dataset_static
+        data_dir = dataset_dir
+    else:
+        data_dir = dataset_dir
+        if dataset_name is not None:
+            data_dir = os.path.join(data_dir, dataset_name)
+            if dataset_size is not None:
+                data_dir += '_' + dataset_size.name.lower()
+            if dataset_static:
+                data_dir += '_static'
+
+    if dataset_inmem:
+        assert dataset_static
+
+    if dataset_static:
+        if dataset_inmem:
+            if dataset_size in {DatasetSize.TINY, DatasetSize.SMALL}:
+                train_img = numpy.load(os.path.join(data_dir, 'train_img.npy'))
+                train_rot = numpy.load(os.path.join(data_dir, 'train_rot.npy'))
+                train_angles_deg = numpy.load(os.path.join(data_dir, 'train_angles.npy'))
+
+                val_img = numpy.load(os.path.join(data_dir, 'val_img.npy'))
+                val_rot = numpy.load(os.path.join(data_dir, 'val_rot.npy'))
+                val_angles_deg = numpy.load(os.path.join(data_dir, 'val_angles.npy'))
+
+                test_img = numpy.load(os.path.join(data_dir, 'test_img.npy'))
+                test_rot = numpy.load(os.path.join(data_dir, 'test_rot.npy'))
+                test_angles_deg = numpy.load(os.path.join(data_dir, 'test_angles.npy'))
+            elif dataset_size == dataset_size.MEDIUM:
+                # huge npy files take longer to load than jpegs + processing; medium still fits in memory
+                [train_img, train_rot], train_angles_deg = load_as_nparr(os.path.join(data_dir, 'train'))
+                [val_img, val_rot], val_angles_deg = load_as_nparr(os.path.join(data_dir, 'val'))
+                [test_img, test_rot], test_angles_deg = load_as_nparr(os.path.join(data_dir, 'test'))
+
+            if grayscale:
+                train_img = batch_rgb2y(train_img, image_data_format)
+                train_rot = batch_rgb2y(train_rot, image_data_format)
+                val_img = batch_rgb2y(val_img, image_data_format)
+                val_rot = batch_rgb2y(val_rot, image_data_format)
+                test_img = batch_rgb2y(test_img, image_data_format)
+                test_rot = batch_rgb2y(test_rot, image_data_format)
+
+            if preproc:
+                train_img = preproc(train_img)
+                train_rot = preproc(train_rot)
+                val_img = preproc(val_img)
+                val_rot = preproc(val_rot)
+                test_img = preproc(test_img)
+                test_rot = preproc(test_rot)
+
+            if angle_encoding == AngleEncoding.CLASSES:
+                angle_resolution = 2 * numpy.pi / n_classes
+            else:
+                angle_resolution = None
+
+            train_angles = encode_angles_inplace(train_angles_deg, angle_encoding, angle_resolution)
+            val_angles = encode_angles_inplace(val_angles_deg, angle_encoding, angle_resolution)
+            test_angles = encode_angles_inplace(test_angles_deg, angle_encoding, angle_resolution)
+
+            train = [train_img, train_rot], train_angles
+            val = [val_img, val_rot], val_angles
+            test = [test_img, test_rot], test_angles
+
+            # @TODO: use keras' Numpy array iterator for shuffling every epoch
+        else:
+            if grayscale:
+                if preproc:
+                    def gray_and_preproc(img):
+                        gray = batch_rgb2y(img)
+                        return preproc(gray)
+
+                    preproc = gray_and_preproc
+                else:
+                    preproc = batch_rgb2y
+
+            train = StaticDirectoryIterator(os.path.join(data_dir, 'train'), preproc, angle_encoding,
+                                            n_classes, batch_size, shuffle, seed, image_data_format)
+
+            val = StaticDirectoryIterator(os.path.join(data_dir, 'val'), preproc, angle_encoding,
+                                          n_classes, batch_size, False, None, image_data_format)
+
+            test = StaticDirectoryIterator(os.path.join(data_dir, 'test'), preproc, angle_encoding,
+                                           n_classes, batch_size, False, None, image_data_format)
+    else:
+        train = AugmentingDirectoryIterator(os.path.join(data_dir, 'train'), img_sidelen, grayscale, preproc,
+                                            angle_encoding, n_classes, batch_size, shuffle, seed, image_data_format)
+
+        val = AugmentingDirectoryIterator(os.path.join(data_dir, 'val'), img_sidelen, grayscale, preproc,
+                                          angle_encoding, n_classes, batch_size, False, None, image_data_format)
+
+        test = AugmentingDirectoryIterator(os.path.join(data_dir, 'test'), img_sidelen, grayscale, preproc,
+                                           angle_encoding, n_classes, batch_size, False, None, image_data_format)
+
+    return train, val, test
+
+
 def main():
+    from estimate_rotation.util import generate_static
     # user params
 
-    train = '/home/bogdan/work/visionsemantics/data/coco_subset/train'
+    train = '/home/bogdan/work/visionsemantics/data/coco_medium/train'
+    train_out = '/home/bogdan/work/visionsemantics/data/coco_medium_static/train'
+
+    val = '/home/bogdan/work/visionsemantics/data/coco_medium/val'
+    val_out = '/home/bogdan/work/visionsemantics/data/coco_medium_static/val'
+
+    test = '/home/bogdan/work/visionsemantics/data/coco_medium/test'
+    test_out = '/home/bogdan/work/visionsemantics/data/coco_medium_static/test'
+
     resolution_degrees = .5
 
     # ~user params
@@ -247,12 +459,17 @@ def main():
 
     n_classes = int(ceil(360. / resolution_degrees))
 
-    train = DirectoryIterator(train, img_side, grayscale, angle_encoding=angle_encoding, n_classes=n_classes,
-                              batch_size=batch_size, seed=42)
+    # generate static datasets
+    for imgdir, outdir in zip([train, val, test], [train_out, val_out, test_out]):
+        generate_static(imgdir, outdir, img_side, batch_size=10)
 
-    for batch_img, batch_rot in train:
-        for img, rot in zip(batch_img, batch_rot):
-            print(1)
+    # this is how we would use it for training
+    train = AugmentingDirectoryIterator(train, img_side, grayscale, preprocess_input, angle_encoding, n_classes,
+                                        batch_size, shuffle=True, seed=None)
+
+    # for batch_img, batch_rot in train:
+    #     for img, rot in zip(batch_img, batch_rot):
+    #         print(1)
 
 
 if __name__ == '__main__':

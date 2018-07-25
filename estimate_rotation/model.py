@@ -6,6 +6,12 @@ from keras.layers import Input, Conv2D, Dense, Flatten, Dropout, BatchNormalizat
 from keras.layers import Lambda
 from keras.regularizers import l2
 from keras.models import Model
+from estimate_rotation.util import preprocess_input as preproc_custom
+from keras.applications.inception_v3 import preprocess_input as preproc_inception
+from keras.applications.vgg16 import preprocess_input as preproc_vgg
+from keras.applications.resnet50 import preprocess_input as preproc_resnet
+
+
 # from keras_applications.imagenet_utils import _obtain_input_shape
 
 from estimate_rotation.common import AngleEncoding
@@ -30,6 +36,14 @@ class Features(Enum):
     INCEPTIONV3 = auto()
 
 
+preproc = {
+    Features.TRAIN: preproc_custom,
+    Features.VGG16: preproc_vgg,
+    Features.RESNET50: preproc_resnet,
+    Features.INCEPTIONV3: preproc_inception
+}
+
+
 # we could bag all the feature maps at the end of the model if we wanted to handle images of different sizes without
 # resizing them first, but this would complicate training, too, as we would have uneven batches. @TODO: try later
 # @unique
@@ -45,7 +59,7 @@ def UntrainedFilterModel(img_side, grayscale, dropout=.25):
     filters = 64  # like resnet50, vgg16, vgg19
 
     # the first layer also subsamples by a factor of 4
-    n_outs_layer1 = filters * img_side * img_side / 4
+    n_outs_layer1 = filters * img_side * img_side / 4.
 
     # we want to add layers until we reach under 50k outputs, to which we can add fc layers
     max_conv_outs = 50000
@@ -64,7 +78,9 @@ def UntrainedFilterModel(img_side, grayscale, dropout=.25):
                kernel_regularizer=l2(1e-4), name='conv1')(input_img)
 
     for block_id in range(n_blocks):
-        filters *= 2
+        # if block_id % 2 == 1:
+        #     filters *= 2
+        filters = int(filters * 1.5)
         x = modified_resnet_block(filters, '', block_id, dropout)(x)
 
     x = BatchNormalization(axis=1 if K.image_data_format() == 'channels_first' else 3)(x)
@@ -106,9 +122,8 @@ def PretrainedFilterModel(model):
     return feature_extractor, frozen_layers
 
 
-def EncoderModel(input_shape, feature_extractor, dropout=.25):
-    input_img = Input(input_shape, name='dummy_input')
-    feature_maps = feature_extractor(input_img)
+def EncoderModel(input_shape, dropout=.25):
+    feature_maps = Input(shape=input_shape)
 
     x = Flatten()(feature_maps)
     if dropout:
@@ -124,7 +139,7 @@ def EncoderModel(input_shape, feature_extractor, dropout=.25):
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
 
-    model = Model(input_img, x)
+    model = Model(feature_maps, x)
 
     return model
 
@@ -250,15 +265,7 @@ def to_deg(angle_encoding, n_classes):
     return f
 
 
-def abs_deg_diff(angles_pred, angles_true):
-    # angles are between -180 and 180 degrees
-    # diffs are between -360 and 360 degrees
-    # abs_diffs are between 0 and 360 degrees
-    abs_diffs = K.abs(angles_true - angles_pred)
-    return K.minimum(abs_diffs, 360 - abs_diffs)
-
-
-def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=None,
+def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=Bounding.NONE,
           n_classes=None, dropout=None, decode_angle=True):
     assert features in Features
     if features != Features.TRAIN:
@@ -280,17 +287,20 @@ def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, fo
     else:
         feature_extractor, frozen_layers = PretrainedFilterModel(features)
 
-    encoder = EncoderModel(input_shape, feature_extractor, dropout)
+    img_features = feature_extractor(imgs)
+    rot_features = feature_extractor(rots)
 
-    encoded_imgs = encoder(imgs)
-    encoded_rots = encoder(rots)
+    encoder = EncoderModel(K.int_shape(img_features)[1:], dropout)
+
+    encoded_imgs = encoder(img_features)
+    encoded_rots = encoder(rot_features)
 
     out = estimate_angle(angle_encoding, force_xy, bounding, n_classes, dropout)(encoded_imgs, encoded_rots)
 
     if decode_angle:
         out = to_deg(angle_encoding, n_classes)(out)
 
-    return Model([imgs, rots], out)
+    return Model([imgs, rots], out), frozen_layers
 
 
 def tst_instantiation():
@@ -398,7 +408,7 @@ def main():
     #
     # # in my opinion, the most stable encoding is sin cos. The target values are bounded, so they will constrain the
     # # output values, too
-    # angle_estimator = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.SINCOS,
+    # angle_estimator, _ = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.SINCOS,
     #                         force_xy=None, bounding=Bounding.NONE, n_classes=None, dropout=None, decode_angle=True)
     #
     # del angle_estimator
@@ -406,14 +416,14 @@ def main():
     # # slightly more risky, but with great potential: constrain the penultimate layer to xy and apply atan2. The risk
     # # comes from the fact that x and y values are not constrained to an interval by the output values, as atan is
     # # applied on y/x
-    # angle_estimator = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.UNIT,
+    # angle_estimator, _ = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.UNIT,
     #                         force_xy=True, bounding=Bounding.NONE, n_classes=None, dropout=None, decode_angle=True)
     #
     # del angle_estimator
     #
     # # if previous model fails because xy values and gradients blow up, try binding their values (and gradients)
     # # artificially
-    # angle_estimator = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.UNIT,
+    # angle_estimator, _ = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.UNIT,
     #                         force_xy=True, bounding=Bounding.TANH, n_classes=None, dropout=None, decode_angle=True)
     #
     # del angle_estimator
@@ -421,7 +431,7 @@ def main():
     # # after trying all these regressors, it's worth seeing how well a classifier works. Set n_classes to
     # # 360. / (avg_angle_error / 2)
     # # where avg_angle_error is the best error we got via regression
-    # angle_estimator = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.CLASSES,
+    # angle_estimator, _ = model(Features.TRAIN, img_side, grayscale=True, angle_encoding=AngleEncoding.CLASSES,
     #                         force_xy=None, bounding=None, n_classes=int(math.ceil(360. / 0.36)),
     #                         dropout=None, decode_angle=True)
     #
@@ -429,29 +439,29 @@ def main():
 
     # a few tests:
 
-    angle_estimator = model(features, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes, dropout,
-                            decode_angle=True)
+    angle_estimator, _ = model(features, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes, dropout,
+                               decode_angle=True)
 
     del angle_estimator
     #
     # grayscale = False
     #
-    # angle_estimator = model(features, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes, dropout,
+    # angle_estimator, _ = model(features, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes, dropout,
     #                         decode_angle=True)
     #
     # del angle_estimator
     #
-    # angle_estimator = model(Features.VGG16, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
+    # angle_estimator, _ = model(Features.VGG16, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
     #                         dropout, decode_angle=True)
     #
     # del angle_estimator
     #
-    # angle_estimator = model(Features.RESNET50, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
+    # angle_estimator, _ = model(Features.RESNET50, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
     #                         dropout, decode_angle=True)
     #
     # del angle_estimator
     #
-    # angle_estimator = model(Features.INCEPTIONV3, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
+    # angle_estimator, _ = model(Features.INCEPTIONV3, img_side, grayscale, angle_encoding, force_xy, bounding, n_classes,
     #                         dropout, decode_angle=True)
     #
     # del angle_estimator

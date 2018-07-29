@@ -257,7 +257,8 @@ def encode_angles_inplace(angles, angle_encoding, n_classes=None):
         return angles
 
     if angle_encoding == AngleEncoding.SINCOS:
-        return numpy.vstack((numpy.sin(angles), numpy.cos(angles))).T
+        # return numpy.vstack((numpy.sin(angles), numpy.cos(angles))).T
+        return numpy.hstack((numpy.sin(angles), numpy.cos(angles)))
 
     if angle_encoding == AngleEncoding.CLASSES:
         resolution = 2 * math.pi / n_classes

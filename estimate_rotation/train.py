@@ -209,7 +209,7 @@ def do_training(
         retrain = True
 
     if retrain:
-        with open(os.path.join(os.path.dirname(net_filename), 'best.txt'), 'rt') as best_file:
+        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'rt') as best_file:
             line = best_file.readline()
             model_checkpoint.best = float(line)
 
@@ -220,7 +220,7 @@ def do_training(
         training_session(train_set, val_set, data_inmem, batch_size, model, min_epochs, max_epochs,
                          early_stopping, model_checkpoint, lr_schedule)
 
-        with open(os.path.join(os.path.dirname(net_filename), 'best.txt'), 'wt') as best_file:
+        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'wt') as best_file:
             best_file.write(str(model_checkpoint.best) + '\n')
             best_file.write(str(model_checkpoint.loss_at_best) + '\n')
 
@@ -243,7 +243,7 @@ def do_training(
         training_session(train_set, val_set, data_inmem, batch_size, model, 0, max_epochs, early_stopping,
                          model_checkpoint, lr_schedule)
 
-        with open(os.path.join(os.path.dirname(net_filename), 'best.txt'), 'wt') as best_file:
+        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'wt') as best_file:
             best_file.write(str(model_checkpoint.best) + '\n')
             best_file.write(str(model_checkpoint.loss_at_best) + '\n')
 
@@ -296,7 +296,7 @@ def do_training(
         print('after training on train + xval')
         test_session(model, data_inmem, batch_size, test_set)
 
-    return model
+    return model_checkpoint.best
 
 
 # def train(datadir, net_filename):
@@ -324,10 +324,13 @@ def train(
             img_side = int(math.ceil(158. / resolution_degrees))
         elif features == Features.RESNET50:
             img_side = 224
+            assert not grayscale
         elif features == Features.VGG16:
             img_side = 224
+            assert not grayscale
         elif features == Features.INCEPTIONV3:
             img_side = 224
+            assert not grayscale
 
     if angle_encoding == AngleEncoding.CLASSES and n_classes is None:
         n_classes = int(math.ceil(360. / resolution_degrees))
@@ -359,13 +362,11 @@ def train(
         rot_predictor, frozen_layers = model(features, img_side, grayscale, angle_encoding, force_xy, bounding,
                                              n_classes, dropout, decode_angle=False)
 
-    trained_rot_predictor = do_training(train_set, val_set, test_set, dataset_inmem, batch_size,
-                                        rot_predictor, frozen_layers, angle_encoding,
-                                        optimizer, lr, optimizer_kwargs, min_epochs, max_epochs,
-                                        net_filename,
-                                        stages, retrain)
+    err = do_training(train_set, val_set, test_set, dataset_inmem, batch_size, rot_predictor, frozen_layers,
+                      angle_encoding, optimizer, lr, optimizer_kwargs, min_epochs, max_epochs, net_filename, stages,
+                      retrain)
 
-    return trained_rot_predictor
+    return err
 
 
 def main():
@@ -386,26 +387,26 @@ def main():
     preproc_filename = os.path.expanduser('~/work/visionsemantics/models/preproc.pkl')
 
     cache_datasets = True
-    no_xval = False
-    no_test = False
+    no_xval = True
+    no_test = True
     retrain = False
-    stages = (1, 2, 3,)
-    # stages = (3,)
+    # stages = (1, 2, 3,)
+    stages = (1, 2, 3)
     # ~user params
 
     # metaparams
     features = Features.TRAIN
-    grayscale = True
-    angle_encoding = AngleEncoding.UNIT
-    force_xy = True
+    grayscale = False
+    angle_encoding = AngleEncoding.SINCOS
+    force_xy = None
     n_classes = None  # can override default n_classes deduced from resolution_degrees
-    bounding = Bounding.NORM
+    bounding = Bounding.NONE
     dropout = None
     img_side = 'min'
 
-    max_epochs = 50
-    min_epochs = 5
-    learning_rate = 1e-6
+    max_epochs = 2
+    min_epochs = 1
+    learning_rate = 9.313225746154785e-10
     optimizer = nadam
     # optimizer = sgd
     # ~metaparams
@@ -413,8 +414,9 @@ def main():
     hostname = platform.node()
     assert hostname in {'mirel', 'nicu'}
 
-    # laptop, tensorflow, resolution_degrees=.5 (img_size == 316), sgd: max batch size = 3
-    # laptop, tensorflow, resolution_degrees=.5 (img_size == 316), nadam: max batch size = 1
+    # laptop, tensorflow, no_pretrain, resolution_degrees=.5 (img_size=316), sgd: max batch size = 3
+    # laptop, tensorflow, no_pretrain, resolution_degrees=.5 (img_size=316), nadam: max batch size = 1
+    # laptop, tensorflow, [vgg16, resnet50, inception_v3] (img_size=224), [nadam, sgd]: fails with batch size=1 in stage 1
     if optimizer == nadam:
         batch_size = 1
     else:

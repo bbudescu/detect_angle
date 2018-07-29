@@ -5,6 +5,7 @@ import math
 import pickle
 import warnings
 import numpy
+import platform
 
 from keras.optimizers import nadam, sgd
 from keras.losses import mse, categorical_crossentropy
@@ -261,11 +262,13 @@ def do_training(
 
             train_imgs = numpy.vstack((train_imgs, val_imgs))
             train_rots = numpy.vstack((train_rots, val_rots))
-            if angle_encoding in {AngleEncoding.RADIANS, AngleEncoding.UNIT, AngleEncoding.DEGREES}:
-                assert train_angles.ndim == val_angles.ndim == 1
-                train_angles = numpy.hstack((train_angles, val_angles))
-            else:
-                train_angles = numpy.vstack((train_angles, val_angles))
+            # if angle_encoding in {AngleEncoding.RADIANS, AngleEncoding.UNIT, AngleEncoding.DEGREES}:
+            #     assert train_angles.ndim == val_angles.ndim == 1
+            #     train_angles = numpy.hstack((train_angles, val_angles))
+            # else:
+            #     train_angles = numpy.vstack((train_angles, val_angles))
+
+            train_angles = numpy.vstack((train_angles, val_angles))
 
             full_train_set = [train_imgs, train_rots], train_angles
             batches_per_epoch = (len(train_imgs) + batch_size - 1) // batch_size
@@ -396,7 +399,7 @@ def main():
     angle_encoding = AngleEncoding.UNIT
     force_xy = True
     n_classes = None  # can override default n_classes deduced from resolution_degrees
-    bounding = Bounding.NONE
+    bounding = Bounding.NORM
     dropout = None
     img_side = 'min'
 
@@ -406,6 +409,9 @@ def main():
     optimizer = nadam
     # optimizer = sgd
     # ~metaparams
+
+    hostname = platform.node()
+    assert hostname in {'mirel', 'nicu'}
 
     # laptop, tensorflow, resolution_degrees=.5 (img_size == 316), sgd: max batch size = 3
     # laptop, tensorflow, resolution_degrees=.5 (img_size == 316), nadam: max batch size = 1

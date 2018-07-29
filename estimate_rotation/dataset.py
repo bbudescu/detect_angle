@@ -138,7 +138,7 @@ class ImgProcIterator(DatasetIterator):
         batch_rot = numpy.empty_like(batch_img)
 
         if self.angle_encoding in {AngleEncoding.DEGREES, AngleEncoding.RADIANS, AngleEncoding.UNIT}:
-            batch_y = numpy.empty(batch_size, K.floatx())
+            batch_y = numpy.empty((batch_size, 1), K.floatx())
         elif self.angle_encoding == AngleEncoding.SINCOS:
             batch_y = numpy.empty((batch_size, 2), K.floatx())
         elif self.angle_encoding == AngleEncoding.CLASSES:
@@ -160,7 +160,7 @@ class ImgProcIterator(DatasetIterator):
             if self.angle_encoding == AngleEncoding.CLASSES:
                 batch_y[o, angle_enc] = True
             else:
-                batch_y[o] = angle_enc
+                batch_y[o, 0] = angle_enc
 
     def _get_batches_of_transformed_samples(self, index_array):
         raise NotImplementedError()

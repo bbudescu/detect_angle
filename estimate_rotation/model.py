@@ -3,7 +3,7 @@ from enum import Enum, auto, unique
 
 from keras import backend as K
 from keras.layers import Input, Conv2D, Dense, Flatten, Dropout, BatchNormalization, Activation, Concatenate, Softmax
-from keras.layers import Lambda
+from keras.layers import Lambda, Reshape
 from keras.regularizers import l2
 from keras.models import Model
 from estimate_rotation.util import preprocess_input as preproc_custom
@@ -225,6 +225,7 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
 
         if force_xy:
             x = Lambda(lambda xy: atan2(xy[:, 1], xy[:, 0]), name='atan2')(x)
+            x = Reshape((1,))(x)
 
         if out_scale:
             x = Lambda(lambda inp: inp * out_scale)(x)

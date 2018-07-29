@@ -58,18 +58,23 @@ def UntrainedFilterModel(img_side, grayscale, dropout=.25):
 
     filters = 64  # like resnet50, vgg16, vgg19
 
+    filter_increase_factor = 1.5  # with 2 we run out of memory, even for batches of a single image of 316 x 316
+
     # the first layer also subsamples by a factor of 4
     n_outs_layer1 = filters * img_side * img_side / 4.
 
     # we want to add layers until we reach under 50k outputs, to which we can add fc layers
-    max_conv_outs = 50000
+    max_conv_outs = 20000
 
     scale = float(n_outs_layer1) / max_conv_outs
 
     # each block halves the image side, and doubles the number of feature maps, thus halving the total number of units
-    n_blocks = int(math.ceil(math.log(scale, 2)))
+    block_scale = 4. / filter_increase_factor
 
-    input_shape = [None] * 3
+    n_blocks = int(math.ceil(math.log(scale, block_scale)))
+
+    # input_shape = [None] * 3
+    input_shape = [img_side] * 3  # just for debug
     input_shape[0 if K.image_data_format() == 'channels_first' else -1] = 1 if grayscale else 3
 
     input_img = Input(input_shape, name='input')
@@ -78,9 +83,7 @@ def UntrainedFilterModel(img_side, grayscale, dropout=.25):
                kernel_regularizer=l2(1e-4), name='conv1')(input_img)
 
     for block_id in range(n_blocks):
-        # if block_id % 2 == 1:
-        #     filters *= 2
-        filters = int(filters * 1.5)
+        filters = int(filters * filter_increase_factor)
         x = modified_resnet_block(filters, '', block_id, dropout)(x)
 
     x = BatchNormalization(axis=1 if K.image_data_format() == 'channels_first' else 3)(x)
@@ -231,15 +234,17 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
     return f
 
 
-def to_deg(angle_encoding, n_classes):
-    assert angle_encoding in AngleEncoding
-    if angle_encoding == AngleEncoding.CLASSES:
-        assert n_classes is not None
-        resolution = 360. / n_classes
-    else:
-        assert n_classes is None
+def to_deg(angles, encoding, n_classes=None):
+    from estimate_rotation.common import AngleEncoding
+    # simplified version of function to_deg from model.py
+    assert encoding in AngleEncoding
+    if encoding == AngleEncoding.CLASSES:
+        if not n_classes:
+            n_classes = K.int_shape(angles)[-1]
 
-    if angle_encoding == AngleEncoding.SINCOS:
+        resolution = 360. / n_classes
+
+    if encoding == AngleEncoding.SINCOS:
         if K.backend() == 'theano':
             from theano.tensor import arctan2 as atan2
         elif K.backend() == 'tensorflow':
@@ -247,22 +252,23 @@ def to_deg(angle_encoding, n_classes):
         else:
             raise NotImplementedError('backend ' + K.backend() + ' not supported')
 
-    def f(encoded_angles):
-        if angle_encoding == AngleEncoding.DEGREES:
-            return encoded_angles
-        elif angle_encoding == AngleEncoding.RADIANS:
-            return Lambda(lambda rad: rad * 180 / math.pi, name='rad2deg')(encoded_angles)
-        elif angle_encoding == AngleEncoding.UNIT:
-            return Lambda(lambda rad: rad * 180, name='unit2deg')(encoded_angles)
-        elif angle_encoding == AngleEncoding.SINCOS:
-            return Lambda(lambda xy: atan2(xy[:, 1], xy[:, 0] * 180 / math.pi), name='xy2deg')(encoded_angles)
-        elif angle_encoding == AngleEncoding.CLASSES:
-            return Lambda(lambda probs: K.cast(K.argmax(probs, axis=-1), K.floatx()) * resolution + resolution / 2. - 180.,
-                          name='softmax2deg')(encoded_angles)
-        else:
-            raise NotImplementedError('unsupported angle encoding ' + str(angle_encoding))
+    if encoding == AngleEncoding.DEGREES:
+        deg = angles
+    elif encoding == AngleEncoding.RADIANS:
+        deg = angles * 180 / math.pi
+    elif encoding == AngleEncoding.UNIT:
+        deg = angles * 180
+    elif encoding == AngleEncoding.SINCOS:
+        sines = angles[:, 0]
+        cosines = angles[:, 1]
+        rad = atan2(cosines, sines)
+        deg = rad * 180 / math.pi
+    elif encoding == AngleEncoding.CLASSES:
+        deg = K.cast(K.argmax(angles, axis=-1), K.floatx()) * resolution + resolution / 2. - 180.
+    else:
+        raise NotImplementedError('unsupported angle encoding ' + str(encoding))
 
-    return f
+    return deg
 
 
 def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=Bounding.NONE,
@@ -298,7 +304,7 @@ def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, fo
     out = estimate_angle(angle_encoding, force_xy, bounding, n_classes, dropout)(encoded_imgs, encoded_rots)
 
     if decode_angle:
-        out = to_deg(angle_encoding, n_classes)(out)
+        out = Lambda(lambda encoded_angles: to_deg(encoded_angles, angle_encoding))(out)
 
     return Model([imgs, rots], out), frozen_layers
 

@@ -1,14 +1,12 @@
+import math
 import numpy
-from scipy.ndimage.interpolation import zoom, rotate as imrot
 from math import floor
 
 from keras.preprocessing.image import apply_affine_transform
 from keras import backend as K
 
 
-def show(img, rot):
-    debug = False
-
+def show(img, rot, debug=False):
     if not debug:
         return
 
@@ -66,6 +64,7 @@ def crop_center_square(img, patch_side=None):
 
 
 def rot_crop_scale(img, rot_deg, zoom_img, zoom_rot, mode, cval, out_img, out_rot):
+    from scipy.ndimage.interpolation import zoom, rotate
     # initial version, using numpy.pad explicitly:
     # crop_sidelen = min(img.shape[0], img.shape[1])
     # padded_crop_sidelen = int(ceil(crop_sidelen * sqrt(2)))
@@ -93,9 +92,9 @@ def rot_crop_scale(img, rot_deg, zoom_img, zoom_rot, mode, cval, out_img, out_ro
         rot = img
     else:
         if img.ndim == 2:
-            rot = imrot(img, rot_deg, reshape=False, order=spline_order, mode=mode, cval=cval)
+            rot = rotate(img, rot_deg, reshape=False, order=spline_order, mode=mode, cval=cval)
         else:
-            rot = numpy.stack([imrot(channel, rot_deg, reshape=False, order=spline_order, mode=mode, cval=cval)
+            rot = numpy.stack([rotate(channel, rot_deg, reshape=False, order=spline_order, mode=mode, cval=cval)
                                for channel in img])
 
     show(img, rot)  # for debugging purposes
@@ -237,7 +236,7 @@ def decode_angle(angle_encoded, angle_encoding):
         return -180 + numpy.argmax(angle_encoded) * resolution + resolution / 2.
 
 
-def encode_angles_inplace(angles, angle_encoding, resolution=None):
+def encode_angles_inplace(angles, angle_encoding, n_classes=None):
     """
     !!! modifies input angles_deg
     """
@@ -252,7 +251,7 @@ def encode_angles_inplace(angles, angle_encoding, resolution=None):
         return angles
 
     # convert to radians
-    angles *= numpy.pi / 180
+    angles *= math.pi / 180
 
     if angle_encoding == AngleEncoding.RADIANS:
         return angles
@@ -261,7 +260,12 @@ def encode_angles_inplace(angles, angle_encoding, resolution=None):
         return numpy.vstack((numpy.sin(angles), numpy.cos(angles))).T
 
     if angle_encoding == AngleEncoding.CLASSES:
-        return numpy.floor((angles + numpy.pi) / resolution).astype(int)
+        resolution = 2 * math.pi / n_classes
+        classes = numpy.floor((angles + numpy.pi) / resolution).astype(int)
+        angles = numpy.zeros((len(classes), n_classes))
+        angles[range(len(classes)), classes] = True
+
+        return angles
 
     raise NotImplementedError()
 
@@ -284,12 +288,13 @@ def generate_static(imgdir, outdir, img_side, batch_size):
     ds.angle_file.close()
 
 
-def load_as_nparr(static_dir):
+def load_as_nparr(static_dir, img_side, grayscale):
     from estimate_rotation.common import AngleEncoding
     from estimate_rotation.dataset import StaticDirectoryIterator
+
     ds = StaticDirectoryIterator(static_dir, preproc=None, angle_encoding=AngleEncoding.DEGREES,
                                  n_classes=None, batch_size=1, shuffle=False, seed=None,
-                                 image_data_format=K.image_data_format())
+                                 image_data_format=K.image_data_format(), img_side=img_side, grayscale=grayscale)
     ds.batch_size = len(ds)
     return ds[0]
 
@@ -303,3 +308,16 @@ def batch_rgb2y(rgb_batch, image_data_format=K.image_data_format()):
     if image_data_format == 'channels_first':
         y_batch = numpy.moveaxis(y_batch, 3, 1)
     return y_batch
+
+
+def zoom_square(img, img_side):
+    from scipy.ndimage.interpolation import zoom
+    assert img.shape[0] == img.shape[1]
+    if img.shape[0] != img_side:
+        zoom_level = float(img_side) / img.shape[0]
+        if img.ndim == 2:
+            img = zoom(img, zoom_level)
+        else:
+            img = numpy.moveaxis(numpy.stack([zoom(channel, zoom_level) for channel in numpy.moveaxis(img, 2, 0)]), 0, 2)
+
+    return img

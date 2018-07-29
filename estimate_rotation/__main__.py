@@ -44,17 +44,13 @@ def get_args():
 
 def load_and_preproc(img_filename, grayscale, img_side, preproc):
     from keras.preprocessing.image import load_img
-    from scipy.ndimage.interpolation import zoom
+    from estimate_rotation.util import zoom_square
+
     from keras import backend as K
 
     img = numpy.asarray(load_img(img_filename, grayscale))
-    assert img.shape[0] == img.shape[1]
-    if img.shape[0] != img_side:
-        zoom_level = float(img_side) / img.shape[0]
-        if img.ndim == 2:
-            img = zoom(img, zoom_level)
-        else:
-            img = numpy.moveaxis(numpy.stack([zoom(channel, zoom_level) for channel in numpy.moveaxis(img, 2, 0)]), 0, 2)
+
+    img = zoom_square(img, img_side)
 
     if not grayscale and K.image_data_format() == 'channels_first':
         img = numpy.moveaxis(img, 2, 0)
@@ -69,23 +65,19 @@ def load_and_preproc(img_filename, grayscale, img_side, preproc):
 def test(net_filename, preproc_filename, img_filename, rot_filename):
     from keras.models import load_model
     from estimate_rotation.util import decode_angle
-    from estimate_rotation.train import mean_abs_deg_diff
 
     with open(preproc_filename, 'rb') as preproc_file:
         preproc_dict = pickle.load(preproc_file)
+
     grayscale = preproc_dict['grayscale']
     preproc = preproc_dict['preproc']
     img_side = preproc_dict['img_side']
     angle_encoding = preproc_dict['angle_encoding']
-    n_classes = preproc_dict['n_classes']
 
     img = load_and_preproc(img_filename, grayscale, img_side, preproc)
     rot = load_and_preproc(rot_filename, grayscale, img_side, preproc)
 
-    mean_abs_deg_diff.angle_encoding = angle_encoding
-    mean_abs_deg_diff.n_classes = n_classes
-
-    model = load_model(net_filename, custom_objects={'mean_abs_deg_diff': mean_abs_deg_diff})
+    model = load_model(net_filename, compile=False)
     angle = model.predict([img.reshape((1,) + img.shape), rot.reshape((1,) + rot.shape)])
     angle = decode_angle(angle[0], angle_encoding)
 

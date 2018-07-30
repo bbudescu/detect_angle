@@ -53,7 +53,7 @@ preproc = {
 #     MAX = auto()
 
 
-def UntrainedFilterModel(img_side, grayscale, dropout=.25):
+def UntrainedFilterModel(img_side, grayscale, convs_per_block=2, skip_layer_connections=True, dropout=.25, l2_penalty=1e-4):
     from estimate_rotation.resnet import modified_resnet_block
 
     filters = 64  # like resnet50, vgg16, vgg19
@@ -80,11 +80,11 @@ def UntrainedFilterModel(img_side, grayscale, dropout=.25):
     input_img = Input(input_shape, name='input')
 
     x = Conv2D(filters, (7, 7), strides=(2, 2), padding='same', kernel_initializer='he_normal',
-               kernel_regularizer=l2(1e-4), name='conv1')(input_img)
+               kernel_regularizer=l2(l2_penalty), name='conv1')(input_img)
 
     for block_id in range(n_blocks):
         filters = int(filters * filter_increase_factor)
-        x = modified_resnet_block(filters, '', block_id, dropout)(x)
+        x = modified_resnet_block(filters, convs_per_block, skip_layer_connections, '', block_id, dropout, l2_penalty)(x)
 
     x = BatchNormalization(axis=1 if K.image_data_format() == 'channels_first' else 3)(x)
     x = Activation('relu')(x)
@@ -125,19 +125,19 @@ def PretrainedFilterModel(model):
     return feature_extractor, frozen_layers
 
 
-def EncoderModel(input_shape, dropout=.25):
+def EncoderModel(input_shape, dropout=.25, l2_penalty=1e-4):
     feature_maps = Input(shape=input_shape)
 
     x = Flatten()(feature_maps)
     if dropout:
         x = Dropout(dropout)(x)
-    x = Dense(4096, kernel_initializer='he_normal', kernel_regularizer=l2(1e-4))(x)
+    x = Dense(4096, kernel_initializer='he_normal', kernel_regularizer=l2(l2_penalty))(x)
 
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
     if dropout:
         x = Dropout(dropout)(x)
-    x = Dense(2048, kernel_initializer='he_normal', kernel_regularizer=l2(1e-4))(x)
+    x = Dense(2048, kernel_initializer='he_normal', kernel_regularizer=l2(l2_penalty))(x)
 
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
@@ -147,7 +147,7 @@ def EncoderModel(input_shape, dropout=.25):
     return model
 
 
-def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None, dropout=.25):
+def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None, dropout=.25, l2_penalty=1e-4):
     assert angle_encoding in AngleEncoding
 
     if angle_encoding in {AngleEncoding.CLASSES, AngleEncoding.SINCOS}:
@@ -170,7 +170,15 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
     out_scale = None
     if force_xy:
         if K.backend() == 'theano':
-            from theano.tensor import arctan2 as atan2
+            from theano.tensor import arctan2
+
+            def atan2(y, x):
+                out = arctan2(y, x)
+                if not hasattr(out, '__name__'):
+                    # I don't know what it has any side-effects, but it seems to work
+                    out.__name__ = 'varul_sandel'
+
+                return out
         elif K.backend() == 'tensorflow':
             from tensorflow import atan2
         else:
@@ -193,7 +201,7 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
         if dropout:
             x = Dropout(dropout)(x)
 
-        x = Dense(2048, kernel_initializer='he_normal', kernel_regularizer=l2(1e-4))(x)
+        x = Dense(2048, kernel_initializer='he_normal', kernel_regularizer=l2(l2_penalty))(x)
         x = BatchNormalization()(x)
         x = Activation('relu')(x)
 
@@ -208,27 +216,33 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
             x = Dropout(dropout)(x)
 
         # we use he init even though the output is not relu. But input is, so it should be beter than xavier.
-        x = Dense(n_units, kernel_initializer='he_normal', kernel_regularizer=l2(1e-4))(x)
+        x = Dense(n_units, kernel_initializer='he_normal', kernel_regularizer=l2(l2_penalty))(x)
 
         if angle_encoding == AngleEncoding.CLASSES:
             return Softmax()(x)
 
         if bounding == Bounding.CLIP:
-            x = Lambda(lambda inp: K.clip(inp, -1, 1), name='clip')(x)
+            x = Lambda(lambda inp: K.clip(inp, -1, 1), output_shape=K.int_shape(x)[1:], name='clip')(x)
         elif bounding == Bounding.TANH:
-            x = Activation('tanh', name='clip')(x)
+            x = Activation('tanh', name='clip_tanh')(x)
         elif bounding == Bounding.NORM:
-            x = Lambda(lambda inp: inp / K.sqrt(K.sum(inp * inp, axis=-1)), name='clip')(x)
+            # theano needs output_shape to be specified
+            x = Lambda(lambda inp: inp / K.sqrt(K.sum(inp * inp, axis=-1)), output_shape=K.int_shape(x)[1:],
+                       name='clip_norm')(x)
 
         if angle_encoding == AngleEncoding.SINCOS:
             return x
 
         if force_xy:
-            x = Lambda(lambda xy: atan2(xy[:, 1], xy[:, 0]), name='atan2')(x)
-            x = Reshape((1,))(x)
+            # this works
+            # x = Lambda(lambda xy: xy[:, 1] + xy[:, 0], output_shape=tuple(), name='atan2_replacement')(x)
+            # this doesn't
+            x = Lambda(lambda xy: atan2(xy[:, 1], xy[:, 0]), output_shape=tuple(), name='atan2')(x)
+
+            x = Reshape((1,), name='reshape')(x)
 
         if out_scale:
-            x = Lambda(lambda inp: inp * out_scale)(x)
+            x = Lambda(lambda inp: inp * out_scale, output_shape=K.int_shape(x)[1:], name='scale')(x)
 
         return x
 
@@ -273,7 +287,8 @@ def to_deg(angles, encoding, n_classes=None):
 
 
 def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=Bounding.NONE,
-          n_classes=None, dropout=None, decode_angle=True):
+          n_classes=None, convs_per_block=2, skip_layer_connections=True, dropout=None, l2_penalty=1e-4,
+          decode_angle=True):
     assert features in Features
     if features != Features.TRAIN:
         # all the pretrained models use rgb
@@ -290,22 +305,26 @@ def model(features, img_side, grayscale, angle_encoding=AngleEncoding.SINCOS, fo
     rots = Input(input_shape, name='input_rot')
 
     if features == Features.TRAIN:
-        feature_extractor, frozen_layers = UntrainedFilterModel(img_side, grayscale, dropout)
+        feature_extractor, frozen_layers = UntrainedFilterModel(img_side, grayscale, convs_per_block,
+                                                                skip_layer_connections, dropout, l2_penalty)
     else:
         feature_extractor, frozen_layers = PretrainedFilterModel(features)
 
     img_features = feature_extractor(imgs)
     rot_features = feature_extractor(rots)
 
-    encoder = EncoderModel(K.int_shape(img_features)[1:], dropout)
+    encoder = EncoderModel(K.int_shape(img_features)[1:], dropout, l2_penalty)
 
     encoded_imgs = encoder(img_features)
     encoded_rots = encoder(rot_features)
 
-    out = estimate_angle(angle_encoding, force_xy, bounding, n_classes, dropout)(encoded_imgs, encoded_rots)
+    out = estimate_angle(angle_encoding, force_xy, bounding, n_classes, dropout, l2_penalty)(encoded_imgs, encoded_rots)
 
     if decode_angle:
-        out = Lambda(lambda encoded_angles: to_deg(encoded_angles, angle_encoding))(out)
+        out = Lambda(lambda encoded_angles: to_deg(encoded_angles, angle_encoding), output_shape=tuple(),
+                     name='to_deg')(out)
+
+        out = Reshape((1,), name='reshape_deg')(out)
 
     return Model([imgs, rots], out), frozen_layers
 

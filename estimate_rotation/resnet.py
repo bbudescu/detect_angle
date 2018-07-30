@@ -52,7 +52,7 @@ def resnet_basic_block(filters, stage, block, dropout=None, is_first_block_of_fi
     return f
 
 
-def modified_resnet_block(filters, base_name, block_idx, dropout):
+def modified_resnet_block(filters, convs, skip_layer_connection, base_name, block_idx, dropout, l2_penalty):
     # replaces the subsampled convolutions with max pooling => fewer params => faster training
     # skip layer connections help avoiding vanishing gradients, although not as much as regular resnets. E.g., if the
     # net's output shape is (1, 1), then only a single pixel in each pool's gradient map will be updated by something
@@ -70,28 +70,28 @@ def modified_resnet_block(filters, base_name, block_idx, dropout):
     channel_axis = 1 if K.image_data_format() == 'channels_first' else 3
 
     def f(input_features):
-        x = BatchNormalization(axis=channel_axis, name=bn_name_base + '2a')(input_features)
-        x = Activation("relu")(x)
-        if dropout is not None:
-            x = SpatialDropout2D(dropout)(x)
-        x = Conv2D(filters=filters, kernel_size=(3, 3), padding="same", kernel_initializer="he_normal",
-                   kernel_regularizer=l2(1e-4), name=conv_name_base + '2a')(x)
+        for conv_idx in range(convs):
+            x = BatchNormalization(axis=channel_axis, name=bn_name_base + '2%c' % (97 + conv_idx))(input_features)
+            x = Activation("relu")(x)
+            if dropout is not None:
+                x = SpatialDropout2D(dropout)(x)
+            x = Conv2D(filters=filters, kernel_size=(3, 3), padding="same", kernel_initializer="he_normal",
+                       kernel_regularizer=l2(l2_penalty), name=conv_name_base + '2%c' % (97 + conv_idx))(x)
 
-        x = BatchNormalization(axis=channel_axis, name=bn_name_base + '2b')(x)
-        x = Activation("relu")(x)
-        if dropout is not None:
-            x = SpatialDropout2D(dropout)(x)
-        x = Conv2D(filters=filters, kernel_size=(3, 3), padding='same', kernel_initializer='he_normal',
-                   kernel_regularizer=l2(1e-4), name=conv_name_base + '2b')(x)
+        if skip_layer_connection:
+            if filters == K.int_shape(input_features)[channel_axis]:
+                shortcut = input_features
+            else:
+                shortcut = Conv2D(filters, (1, 1), kernel_initializer='he_normal', kernel_regularizer=l2(l2_penalty),
+                                  name=conv_name_base + '1')(input_features)
+                shortcut = BatchNormalization(axis=channel_axis, name=bn_name_base + '1')(shortcut)
 
-        if filters == K.int_shape(input_features)[channel_axis]:
-            shortcut = input_features
+        if not convs:
+            x = shortcut
+        elif not skip_layer_connection:
+            x = x
         else:
-            shortcut = Conv2D(filters, (1, 1), kernel_initializer='he_normal', kernel_regularizer=l2(1e-4),
-                              name=conv_name_base + '1')(input_features)
-            shortcut = BatchNormalization(axis=channel_axis, name=bn_name_base + '1')(shortcut)
-
-        x = add([x, shortcut])
+            x = add([x, shortcut])
 
         # previously we did this here instead of in the beginning
         # x = BatchNormalization(axis=channel_axis, name=bn_name_base + 'merged')(input_features)

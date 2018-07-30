@@ -262,9 +262,9 @@ def encode_angles_inplace(angles, angle_encoding, n_classes=None):
 
     if angle_encoding == AngleEncoding.CLASSES:
         resolution = 2 * math.pi / n_classes
-        classes = numpy.floor((angles + numpy.pi) / resolution).astype(int)
+        classes = numpy.floor((angles + numpy.pi) / resolution).astype(int).flatten()
         angles = numpy.zeros((len(classes), n_classes))
-        angles[range(len(classes)), classes] = True
+        angles[range(len(classes)), list(classes)] = True
 
         return angles
 

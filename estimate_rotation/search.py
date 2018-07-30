@@ -31,6 +31,7 @@ def fix_args(**kwargs):
     angle_encoding_params = kwargs.pop('angle_encoding_params')
     kwargs.update(angle_encoding_params)
 
+    kwargs['convs_per_block'] = int(kwargs['convs_per_block'])
     kwargs['optimizer'] = kwargs['optimizer_kwargs'].pop('optimizer')
     kwargs['batch_size'] = int(kwargs['optimizer_kwargs'].pop('batch_size'))
     if kwargs['n_classes']:
@@ -61,6 +62,7 @@ def get_space(overfit):
         'optimizer_kwargs': choice('optimizer kwargs', [
             {
                 'optimizer': nadam,
+                # @TODO: batch_size now depends on model complexity, too
                 # in our test, it worked with 5, but from hyperopt, it crashes mode often
                 'batch_size': 1 if backend == 'tensorflow' else 2,
             },
@@ -77,7 +79,7 @@ def get_space(overfit):
         'img_side': 224,
         'grayscale': False,
         # 'features': choice('pretrained features', [Features.VGG16, Features.RESNET50, Features.INCEPTIONV3])
-        'features': Features.VGG16,  # only vgg16 can be trained in stage 2; it might be worth, though trying out the others, too, with frozen layers
+        'features': Features.VGG16,  # only vgg16 can be trained in stage 2; it might be worth, though, trying out the others, too, with frozen layers
         'optimizer_kwargs': {
             'optimizer': sgd,
             'batch_size': 3 if backend == 'tensorflow' else 5,  # if we get here, backend == theano
@@ -125,9 +127,14 @@ def get_space(overfit):
                                                            direct_encoding_space])
     }
 
+    # 'skip_layer_connections' 'l2_penalty'
+
     model_param_space = {
         # 'decode_angle': False,
         'dropout': None if overfit else quniform('layer1_dropout_var', 0, 0.7, 0.1),
+        'l2_penalty': 0 if overfit else 2 ** quniform('l2 penalty', -46, 0, 1),  # between 1e-14 and 1
+        'convs_per_block': quniform('convs per block', 1, 2, 1),
+        'skip_layer_connections': choice('use shortcuts', [False, True])
     }
 
     model_param_space.update(features_space)
@@ -157,10 +164,11 @@ def safe_save(obj, filename):
 # def best_net(train, xval, overfit, max_epochs, max_evals, trials_filename, net_filename, best_net_filename,
 #              force=False):
 def best_net(
-        best_net_filename,  best_params_filename, # output
+        # output
+        best_net_filename, best_preproc_filename, best_params_filename, best_stage_results_filename,
         # search process parameters:
         overfit, max_evals, trials_filename, overwrite_trials,
-        temp_net_filename, temp_preproc_filename,
+        temp_net_filename, temp_preproc_filename, temp_stage_results_filename,
         dataset_dir, dataset_name=None, dataset_size=None, dataset_static=False, dataset_inmem=False,
         shuffle_train=True, seed=42, image_data_format=K.image_data_format(), cache_datasets=False,
         preproc='default', min_epochs=3, max_epochs=50, stages=(1, 2, 3), retrain=False):
@@ -182,13 +190,17 @@ def best_net(
 
             safe_save(trials, trials_filename)
 
+            print('experiment', objective.iter, '/', max_evals, '; best err:', objective.min)
+            print('training args:', args)
+
             try:
                 resolution_degrees = None
-                err = train(temp_net_filename, temp_preproc_filename, dataset_dir, dataset_name, dataset_size,
-                            dataset_static, dataset_inmem, shuffle_train, seed, image_data_format, args['no_xval'],
-                            args['no_test'], cache_datasets, args['features'], args['img_side'],
-                            resolution_degrees, args['grayscale'], preproc, args['angle_encoding'],
-                            args['force_xy'], args['bounding'], args['n_classes'], args['dropout'], args['batch_size'],
+                err = train(temp_net_filename, temp_preproc_filename, temp_stage_results_filename, dataset_dir,
+                            dataset_name, dataset_size, dataset_static, dataset_inmem, shuffle_train, seed,
+                            image_data_format, args['no_xval'], args['no_test'], cache_datasets, args['features'],
+                            args['img_side'], resolution_degrees, args['grayscale'], preproc, args['angle_encoding'],
+                            args['force_xy'], args['bounding'], args['n_classes'], args['convs_per_block'],
+                            args['skip_layer_connections'], args['dropout'], args['l2_penalty'], args['batch_size'],
                             args['optimizer'], args['lr'], args['optimizer_kwargs'], min_epochs, max_epochs, stages,
                             retrain)
             except:
@@ -198,6 +210,8 @@ def best_net(
             else:
                 if err < objective.min:
                     shutil.copyfile(temp_net_filename, best_net_filename)
+                    shutil.copyfile(temp_preproc_filename, best_preproc_filename)
+                    shutil.copyfile(temp_stage_results_filename, best_stage_results_filename)
                     all_args = args.copy()
                     all_args.update({
                         'dataset_dir': dataset_dir,
@@ -220,7 +234,7 @@ def best_net(
                         pickle.dump(all_args, best_params_file)
                     print('NEW BEST FOUND')
                 objective.min = min(err, objective.min)
-                print('experiment:', objective.iter, '/', max_evals, '; best err:', objective.min)
+
                 # return {'loss': train_loss_at_best_xval, 'true_loss': -best_corr_xval, 'status': STATUS_OK,
                 #                 'model': model}
                 return {'loss': err, 'status': STATUS_OK, 'args': args}
@@ -267,11 +281,17 @@ def test():
 
 def main():
     models_dir = os.path.expanduser('~/work/visionsemantics/models')
-    best_net_filename = os.path.join(models_dir, 'best_net.h5')
+
     best_args_filename = os.path.join(models_dir, 'best_net_train_params.pkl')
+    best_net_filename = os.path.join(models_dir, 'best_net.h5')
+    best_preproc_filename = os.path.join(models_dir, 'best_preproc.pkl')
+    best_stage_results_filename = os.path.join(models_dir, 'best_stage_results.txt')
+
     trials_filename = os.path.join(models_dir, 'trials.pkl')
+
     temp_net_filename = os.path.join(models_dir, 'temp_net.h5')
     temp_preproc_filename = os.path.join(models_dir, 'temp_preproc.pkl')
+    temp_stage_results_filename = os.path.join(models_dir, 'temp_stage_results.txt')
 
     image_data_format = 'channels_first'
     shuffle_train = True
@@ -295,8 +315,9 @@ def main():
     max_evals = 100
     overwrite_trials = True
 
-    best_args = best_net(best_net_filename, best_args_filename, overfit, max_evals, trials_filename, overwrite_trials,
-                         temp_net_filename, temp_preproc_filename, dataset_dir, dataset_name, dataset_size,
+    best_args = best_net(best_net_filename, best_preproc_filename, best_args_filename, best_stage_results_filename,
+                         overfit, max_evals, trials_filename, overwrite_trials, temp_net_filename,
+                         temp_preproc_filename, temp_stage_results_filename, dataset_dir, dataset_name, dataset_size,
                          dataset_static, dataset_inmem, shuffle_train, seed, image_data_format, cache_dataset, preproc,
                          min_epochs, max_epochs, stages, retrain)
 

@@ -65,19 +65,23 @@ def load_and_preproc(img_filename, grayscale, img_side, preproc):
 def test(net_filename, preproc_filename, img_filename, rot_filename):
     from keras.models import load_model
     from estimate_rotation.util import decode_angle
+    from keras import backend as K
 
     with open(preproc_filename, 'rb') as preproc_file:
         preproc_dict = pickle.load(preproc_file)
 
-    grayscale = preproc_dict['grayscale']
+    model = load_model(net_filename, compile=False)
+    model.save(net_filename, include_optimizer=False)
+
+    grayscale = model.input_shape[0][1 if K.image_data_format() == 'channels_first' else -1] == 1
+    img_side = model.input_shape[0][-2]
+
     preproc = preproc_dict['preproc']
-    img_side = preproc_dict['img_side']
     angle_encoding = preproc_dict['angle_encoding']
 
     img = load_and_preproc(img_filename, grayscale, img_side, preproc)
     rot = load_and_preproc(rot_filename, grayscale, img_side, preproc)
 
-    model = load_model(net_filename, compile=False)
     angle = model.predict([img.reshape((1,) + img.shape), rot.reshape((1,) + rot.shape)])
     angle = decode_angle(angle[0], angle_encoding)
 

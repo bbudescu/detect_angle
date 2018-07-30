@@ -139,7 +139,7 @@ def do_training(
         # training metaparameters
         optimizer_class, lr, optimizer_kw_args, min_epochs, max_epochs,
         # output
-        net_filename,
+        net_filename, stage_results_filename,
         # helper params for tuning
         stages=(1, 2, 3), retrain=False
 ):
@@ -205,7 +205,7 @@ def do_training(
         retrain = True
 
     if retrain:
-        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'rt') as best_file:
+        with open(stage_results_filename, 'rt') as best_file:
             line = best_file.readline()
             model_checkpoint.best = float(line)
 
@@ -216,7 +216,7 @@ def do_training(
         training_session(train_set, val_set, data_inmem, batch_size, model, min_epochs, max_epochs,
                          early_stopping, model_checkpoint, lr_schedule)
 
-        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'wt') as best_file:
+        with open(stage_results_filename, 'wt') as best_file:
             best_file.write(str(model_checkpoint.best) + '\n')
             best_file.write(str(model_checkpoint.loss_at_best) + '\n')
 
@@ -249,7 +249,7 @@ def do_training(
         training_session(train_set, val_set, data_inmem, batch_size, model, 0, max_epochs, early_stopping,
                          model_checkpoint, lr_schedule)
 
-        with open(os.path.join(os.path.dirname(net_filename), 'net_results'), 'wt') as best_file:
+        with open(stage_results_filename, 'wt') as best_file:
             best_file.write(str(model_checkpoint.best) + '\n')
             best_file.write(str(model_checkpoint.loss_at_best) + '\n')
 
@@ -302,25 +302,29 @@ def do_training(
         print('after training on train + xval')
         test_session(model, data_inmem, batch_size, test_set)
 
-    return model_checkpoint.best
+    if not stages:
+        test_session(model, data_inmem, batch_size, test_set)
+
+    return model, model_checkpoint.best
 
 
 # def train(datadir, net_filename):
 def train(
         # output files
-        net_filename, preproc_filename,
+        net_filename, preproc_filename, stage_results_filename,
         # dataset params
         dataset_dir, dataset_name=None, dataset_size=None, dataset_static=False, dataset_inmem=False,
         shuffle_train=True, seed=42, image_data_format=K.image_data_format(), no_xval=False, no_test=False,
         cache_datasets=False,
         # model params
         features=Features.TRAIN, img_side='min', resolution_degrees=.5, grayscale=True, preproc='default',
-        angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=Bounding.NONE, n_classes=None, dropout=None,
+        angle_encoding=AngleEncoding.SINCOS, force_xy=None, bounding=Bounding.NONE, n_classes=None,
+        convs_per_block=2, skip_layer_connections=2, dropout=None, l2_penalty=1e-4,
         # training params
         batch_size=2, optimizer=sgd, lr=5e-4, optimizer_kwargs={'momentum': .9, 'nesterov': True}, min_epochs=20,
         max_epochs=50,
         # manual tuning helper params
-        stages=(1, 2, 3), retrain=False):
+        stages=(1, 2, 3), retrain=False, show_predictions=False):
     from estimate_rotation.dataset import datasets
     from estimate_rotation.model import model, preproc as default_preproc
 
@@ -345,8 +349,7 @@ def train(
         preproc = default_preproc[features]
 
     with open(preproc_filename, 'wb') as preproc_file:
-        pickle.dump({'grayscale': grayscale, 'preproc': preproc, 'img_side': img_side, 'angle_encoding': angle_encoding,
-                     'n_classes': n_classes}, preproc_file)
+        pickle.dump({'preproc': preproc, 'angle_encoding': angle_encoding}, preproc_file)
 
     train_set, val_set, test_set = datasets(dataset_dir, dataset_name, dataset_size, dataset_static, dataset_inmem,
                                             img_side, grayscale, preproc, angle_encoding, n_classes, batch_size,
@@ -366,32 +369,50 @@ def train(
             layer.trainable = trainable  # restore original value
     else:
         rot_predictor, frozen_layers = model(features, img_side, grayscale, angle_encoding, force_xy, bounding,
-                                             n_classes, dropout, decode_angle=False)
+                                             n_classes, convs_per_block, skip_layer_connections, dropout, l2_penalty,
+                                             decode_angle=False)
 
-    err = do_training(train_set, val_set, test_set, dataset_inmem, batch_size, rot_predictor, frozen_layers,
-                      angle_encoding, optimizer, lr, optimizer_kwargs, min_epochs, max_epochs, net_filename, stages,
-                      retrain)
+    model, err = do_training(train_set, val_set, test_set, dataset_inmem, batch_size, rot_predictor, frozen_layers,
+                             angle_encoding, optimizer, lr, optimizer_kwargs, min_epochs, max_epochs, net_filename,
+                             stage_results_filename, stages, retrain)
+
+    if show_predictions:
+        from estimate_rotation.util import decode_angle
+        if not dataset_inmem:
+            raise NotImplementedError()
+        test_predictions = model.predict(test_set[0], batch_size, verbose=1)
+        print('ground truth, prediction, diff')
+        for pred, gt in zip(test_predictions, test_set[1]):
+            pred = decode_angle(pred, angle_encoding)
+            gt = decode_angle(gt, angle_encoding)
+
+            print('%6.2f : %6.2f (%6.2f)' % (gt, pred, abs(gt - pred)))
 
     return err
 
 
 def main():
-    # playground for training various models
     from estimate_rotation.dataset import DatasetSize
     from estimate_rotation.model import Features
 
     assert K.image_data_format() == 'channels_first'
 
+    # playground for training various models
+
     # user params
-    resolution_degrees = .75
+    resolution_degrees = None
     dataset_dir = os.path.expanduser('~/work/visionsemantics/data/')
     dataset_name = 'coco'
-    dataset_size = DatasetSize.MEDIUM
+    dataset_size = DatasetSize.TINY
     dataset_static = True
     dataset_inmem = True
-    net_filename = os.path.expanduser('~/work/visionsemantics/models/tiny_net.h5')
-    preproc_filename = os.path.expanduser('~/work/visionsemantics/models/preproc.pkl')
 
+    models_dir = os.path.expanduser('~/work/visionsemantics/models')
+    net_filename = os.path.join(models_dir, 'net.h5')
+    preproc_filename = os.path.join(models_dir, 'preproc.pkl')
+    stage_results_filename = os.path.join(models_dir, 'stage_resutls.txt')
+
+    show_predictions = True
     cache_datasets = True
     no_xval = False
     no_test = False
@@ -403,16 +424,20 @@ def main():
     # metaparams
     features = Features.TRAIN
     grayscale = False
-    angle_encoding = AngleEncoding.SINCOS
-    force_xy = None
-    n_classes = None  # can override default n_classes deduced from resolution_degrees
-    bounding = Bounding.NONE
+    angle_encoding = AngleEncoding.UNIT
+    force_xy = True
+    n_classes = None
+    bounding = Bounding.TANH
     dropout = None
-    img_side = 'min'
+    l2_penalty = 1e-4
+    img_side = 120
 
-    max_epochs = 10
+    convs_per_block = 1
+    skip_layer_connections = False
+
     min_epochs = 1
-    learning_rate = 9.313225746154785e-10
+    max_epochs = 2
+    learning_rate = 1e-4
     optimizer = nadam
     # optimizer = sgd
     # ~metaparams
@@ -445,24 +470,32 @@ def main():
     #     theano: not yet explored. We'll just use the same batch sizes as on the laptop, although the desktop has
     #             twice the memory.
 
-    batch_size = 2
-
-    # if optimizer == nadam:
-    #     batch_size = 1
-    # else:
-    #     batch_size = 3
+    if K.backend() == 'tensorflow':
+        if optimizer == nadam:
+            batch_size = 1
+        else:
+            batch_size = 3
+    elif K.backend() == 'theano':
+        if optimizer == nadam:
+            batch_size = 3
+        else:
+            batch_size = 5
 
     optimizer_kwargs = {}
     if optimizer == sgd:
         optimizer_kwargs['momentum'] = .5
         optimizer_kwargs['nesterov'] = True
 
-    train(net_filename, preproc_filename, dataset_dir, dataset_name, dataset_size, dataset_static, dataset_inmem,
+    train(net_filename, preproc_filename, stage_results_filename, dataset_dir, dataset_name, dataset_size,
+          dataset_static, dataset_inmem,
           no_xval=no_xval, no_test=no_test, cache_datasets=cache_datasets,
           features=features, img_side=img_side, resolution_degrees=resolution_degrees, grayscale=grayscale,
-          angle_encoding=angle_encoding, force_xy=force_xy, bounding=bounding, n_classes=n_classes, dropout=dropout,
+          angle_encoding=angle_encoding, force_xy=force_xy, bounding=bounding, n_classes=n_classes,
+          convs_per_block=convs_per_block, skip_layer_connections=skip_layer_connections, dropout=dropout,
+          l2_penalty=l2_penalty,
           batch_size=batch_size, optimizer=optimizer, lr=learning_rate, optimizer_kwargs=optimizer_kwargs,
-          min_epochs=min_epochs, max_epochs=max_epochs, stages=stages, retrain=retrain)
+          min_epochs=min_epochs, max_epochs=max_epochs, stages=stages, retrain=retrain,
+          show_predictions=show_predictions)
 
 
 if __name__ == '__main__':

@@ -164,8 +164,8 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
         assert bounding is None
     else:
         assert bounding in Bounding
-        if not force_xy and angle_encoding != AngleEncoding.SINCOS:
-            assert bounding != Bounding.NORM
+        # if not force_xy and angle_encoding != AngleEncoding.SINCOS:
+        #     assert bounding != Bounding.NORM
 
     out_scale = None
     if force_xy:

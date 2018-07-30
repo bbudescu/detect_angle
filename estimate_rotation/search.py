@@ -3,6 +3,10 @@ import gc
 import os
 import platform
 from math import ceil
+
+from estimate_rotation import config
+config.keras('theano', platform.node())
+
 from keras.optimizers import nadam, sgd
 from keras import backend as K
 import shutil
@@ -39,22 +43,50 @@ def fix_args(**kwargs):
 def get_space(overfit):
     # resolution_degrees is used only when not using pretrained features, and when angles are encoded as classes
 
-    hostname = platform.node()
+    hostname = platform.node()  # maybe the desktop can do stuff the laptop can't (more mem)  TODO
     backend = K.backend()
+
+    momentum_space = quniform('sgd_momentum', 0, .9, .1)
+
+    training_param_space = {
+        # we treat the lr common to both solvers, because nesterov momentum and batch normalization will, probably,
+        # enable high learning rates for any solver
+        'lr': 2 ** quniform('learning rate', -46, 3, 1),  # learning rates between 1e-14 and 8, exponential step
+    }
 
     untrained_features_space = {
         'img_side': 158. / quniform('resolution degrees for img_side', .5, 2, .25),
         'grayscale': choice('convert to grayscale', [False, True]),
         'features': Features.TRAIN,
+        'optimizer_kwargs': choice('optimizer kwargs', [
+            {
+                'optimizer': nadam,
+                # in our test, it worked with 5, but from hyperopt, it crashes mode often
+                'batch_size': 1 if backend == 'tensorflow' else 2,
+            },
+            {
+                'optimizer': sgd,
+                'batch_size': 3 if backend == 'tensorflow' else 5,
+                'nesterov': True,
+                'momentum': momentum_space
+            }
+        ])
     }
 
     pretrained_features_space = {
         'img_side': 224,
         'grayscale': False,
-        'features': choice('pretrained features', [Features.VGG16, Features.RESNET50, Features.INCEPTIONV3])
+        # 'features': choice('pretrained features', [Features.VGG16, Features.RESNET50, Features.INCEPTIONV3])
+        'features': Features.VGG16,  # only vgg16 can be trained in stage 2; it might be worth, though trying out the others, too, with frozen layers
+        'optimizer_kwargs': {
+            'optimizer': sgd,
+            'batch_size': 3 if backend == 'tensorflow' else 5,  # if we get here, backend == theano
+            'nesterov': True,
+            'momentum': momentum_space
+        }
     }
 
-    if hostname == 'mirel' and backend == 'tensorflow':
+    if backend == 'tensorflow':
         features_space = {
             'feature_model_params': untrained_features_space
         }
@@ -100,25 +132,6 @@ def get_space(overfit):
 
     model_param_space.update(features_space)
     model_param_space.update(encoding_space)
-
-    batch_size_space = 2 ** quniform('batch size', 0, 4, 1),  # batch size in [1, 2, 4, 8, 16]
-
-    training_param_space = {
-        # we treat the lr common to both solvers, because nesterov momentum and batch normalization will, probably,
-        # enable high learning rates for any solver
-        'lr': 2 ** quniform('learning rate', -46, 3, 1),  # learning rates between 1e-14 and 8, exponential step
-        'optimizer_kwargs': choice('optimizer kwargs', [
-            {
-                'optimizer': nadam,
-                'batch_size': 1 if hostname == 'mirel' and backend == 'tensorflow' else batch_size_space
-             },
-            {
-                'optimizer': sgd,
-                'batch_size': 3 if hostname == 'mirel' and backend == 'tensorflow' else batch_size_space,
-                'momentum': quniform('sgd_momentum', 0, .9, .1), 'nesterov': True
-            }
-        ])
-    }
 
     # merge the two dicts
     space = model_param_space.copy()
@@ -266,20 +279,20 @@ def main():
 
     dataset_dir = os.path.expanduser('~/work/visionsemantics/data/')
     dataset_name = 'coco'
-    dataset_size = DatasetSize.TINY
+    dataset_size = DatasetSize.MEDIUM
     dataset_static = True
     dataset_inmem = True
     cache_dataset = True
     preproc = 'default'
 
     min_epochs = 1
-    max_epochs = 2
+    max_epochs = 10
 
     stages = (1, 2, 3)
     retrain = False
 
-    overfit = True
-    max_evals = 10
+    overfit = False
+    max_evals = 100
     overwrite_trials = True
 
     best_args = best_net(best_net_filename, best_args_filename, overfit, max_evals, trials_filename, overwrite_trials,

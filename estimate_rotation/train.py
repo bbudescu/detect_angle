@@ -7,6 +7,9 @@ import warnings
 import numpy
 import platform
 
+from estimate_rotation import config
+config.keras('theano', platform.node())
+
 from keras.optimizers import nadam, sgd
 from keras.losses import mse, categorical_crossentropy
 from keras import backend as K
@@ -188,14 +191,7 @@ def do_training(
     if val_set:
         metric_name = 'val_' + metric_name
 
-    old_optimizer = model.optimizer
-
     model.compile(optimizer=optimizer, loss=loss, metrics=[metric])
-
-    if old_optimizer:
-        # doesn't work... getting oom, anyway
-        del old_optimizer
-        gc.collect()  # shouldn't be necessary
 
     # @TODO: for a real life scenario: create our own EarlyStopping implementation that supports decisions based on
     #        relative improvement, and that increases patience proportionally with the number of epochs so far; also,
@@ -237,8 +233,18 @@ def do_training(
         for frozen_layer in frozen_layers:
             frozen_layer.trainable = True
 
-        # reset learning rate for optimizer (ReduceLROnPlateau callback might have modified it)
-        K.set_value(model.optimizer.lr, lr)
+        old_optimizer = model.optimizer
+        model.compile(optimizer=optimizer, loss=loss, metrics=[metric])
+        if old_optimizer:
+            # doesn't work... getting oom, anyway
+            del old_optimizer
+            gc.collect()  # shouldn't be necessary
+
+        # # reset learning rate for optimizer (ReduceLROnPlateau callback might have modified it)
+        # K.set_value(model.optimizer.lr, lr)
+        #
+        # # we need to recompile the model after thawing the weights
+        # model.compile(optimizer=model.optimizer, loss=loss, metrics=[metric])
 
         training_session(train_set, val_set, data_inmem, batch_size, model, 0, max_epochs, early_stopping,
                          model_checkpoint, lr_schedule)
@@ -377,18 +383,18 @@ def main():
     assert K.image_data_format() == 'channels_first'
 
     # user params
-    resolution_degrees = .5
+    resolution_degrees = .75
     dataset_dir = os.path.expanduser('~/work/visionsemantics/data/')
     dataset_name = 'coco'
-    dataset_size = DatasetSize.TINY
+    dataset_size = DatasetSize.MEDIUM
     dataset_static = True
     dataset_inmem = True
     net_filename = os.path.expanduser('~/work/visionsemantics/models/tiny_net.h5')
     preproc_filename = os.path.expanduser('~/work/visionsemantics/models/preproc.pkl')
 
     cache_datasets = True
-    no_xval = True
-    no_test = True
+    no_xval = False
+    no_test = False
     retrain = False
     # stages = (1, 2, 3,)
     stages = (1, 2, 3)
@@ -404,7 +410,7 @@ def main():
     dropout = None
     img_side = 'min'
 
-    max_epochs = 2
+    max_epochs = 10
     min_epochs = 1
     learning_rate = 9.313225746154785e-10
     optimizer = nadam
@@ -414,13 +420,37 @@ def main():
     hostname = platform.node()
     assert hostname in {'mirel', 'nicu'}
 
-    # laptop, tensorflow, no_pretrain, resolution_degrees=.5 (img_size=316), sgd: max batch size = 3
-    # laptop, tensorflow, no_pretrain, resolution_degrees=.5 (img_size=316), nadam: max batch size = 1
-    # laptop, tensorflow, [vgg16, resnet50, inception_v3] (img_size=224), [nadam, sgd]: fails with batch size=1 in stage 1
-    if optimizer == nadam:
-        batch_size = 1
-    else:
-        batch_size = 3
+    # laptop:
+    #     tf:
+    #         no_pretrain, resolution_degrees=.5 (img_size=316):
+    #             sgd: max batch size = 3
+    #             nadam: max batch size = 1
+    #         [vgg16, resnet50, inception_v3] (img_size=224), [nadam, sgd]: fails with batch size=1 in stage 1
+    #     theano:
+    #         no_pretrain, resolution_degrees=.5 (img_size=316):
+    #             nadam: max batch size = 5
+    #             sgd: max batch size = 7
+    #         vgg16 (img_size=224):
+    #             sgd: works with batch size = 5
+    #             nadam: oom with batch size = 1 in stage 2
+    #         resnet50 (img_size=224):
+    #             sgd: oom with batch size = 1
+    #             nadam: oom with batch size = 1
+    #         inception_v3 (img_size=224):
+    #             sgd: oom with batch size = 1
+    #             nadam: oom with batch size = 1
+    #
+    # desktop:
+    #     tf: doesn't work at all
+    #     theano: not yet explored. We'll just use the same batch sizes as on the laptop, although the desktop has
+    #             twice the memory.
+
+    batch_size = 2
+
+    # if optimizer == nadam:
+    #     batch_size = 1
+    # else:
+    #     batch_size = 3
 
     optimizer_kwargs = {}
     if optimizer == sgd:

@@ -2,6 +2,8 @@ from keras.layers import Conv2D, BatchNormalization, Activation, SpatialDropout2
 from keras.regularizers import l2
 from keras import backend as K
 
+from keras_contrib.applications import resnet
+
 
 def _block_name_base(stage, block):
     """Get the convolution name base and batch normalization name base defined by stage and block.
@@ -70,8 +72,9 @@ def modified_resnet_block(filters, convs, skip_layer_connection, base_name, bloc
     channel_axis = 1 if K.image_data_format() == 'channels_first' else 3
 
     def f(input_features):
+        x = input_features
         for conv_idx in range(convs):
-            x = BatchNormalization(axis=channel_axis, name=bn_name_base + '2%c' % (97 + conv_idx))(input_features)
+            x = BatchNormalization(axis=channel_axis, name=bn_name_base + '2%c' % (97 + conv_idx))(x)
             x = Activation("relu")(x)
             if dropout is not None:
                 x = SpatialDropout2D(dropout)(x)

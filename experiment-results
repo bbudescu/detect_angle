@@ -1,0 +1,287 @@
+ # user params
+resolution_degrees = None
+dataset_dir = os.path.expanduser('~/work/visionsemantics/data/')
+dataset_name = 'coco'
+dataset_size = DatasetSize.SMALL
+dataset_static = True
+dataset_inmem = True
+
+models_dir = os.path.expanduser('~/work/visionsemantics/models')
+net_filename = os.path.join(models_dir, 'net.h5')
+preproc_filename = os.path.join(models_dir, 'preproc.pkl')
+stage_results_filename = os.path.join(models_dir, 'stage_resutls.txt')
+
+show_predictions = False
+cache_datasets = True
+no_xval = True
+no_test = True
+retrain = False
+# stages = (1, 2, 3,)
+stages = (1,)
+# ~user params
+
+# laptop:
+#     tf:
+#         no_pretrain, resolution_degrees=.5 (img_size=316):
+#             sgd: max batch size = 3
+#             nadam: max batch size = 1
+#         [vgg16, resnet50, inception_v3] (img_size=224), [nadam, sgd]: fails with batch size=1 in stage 1
+#     theano:
+#         no_pretrain, img_size=316:
+#             nadam: max batch size = 5
+#             sgd: max batch size = 7
+#         vgg16 (img_size=224):
+#             sgd: oom with batch size = 1
+#             nadam: oom with batch size = 1
+#         resnet50 (img_size=224):
+#             sgd: oom with batch size = 1
+#             nadam: oom with batch size = 1
+#         inception_v3 (img_size=224):
+#             sgd: oom with batch size = 1
+#             nadam: oom with batch size = 1
+#
+# desktop:
+#     tf: doesn't work at all
+#     theano: not yet explored. We'll just use the same batch sizes as on the laptop, although the desktop has
+#             twice the memory.
+#             not sure, but I think I did a bunch of tests, and vgg16 worked with batch_size = 5 (sgd), and
+#             batch_size = 1 with nadam (first stage only)
+
+# metaparams
+features = Features.TRAIN
+grayscale = False
+angle_encoding = AngleEncoding.SINCOS
+force_xy = None
+n_classes = None
+bounding = Bounding.TANH
+dropout = None
+l2_penalty = 0
+img_side = 96
+
+convs_per_block = 1
+skip_layer_connections = False
+
+min_epochs = 0
+max_epochs = 100
+
+optimizer = nadam
+batchsize = 10
+# nadam, learning_rate = 1e-5 -> 60 degrees error
+# nadam, learning_rate = 2e-5 -> 50 degrees error
+# nadam, learning_rate = 1e-4 -> 51 degrees error
+# nadam, learning_rate = 2e-4 -> <40 degrees error
+# nadam, learning_rate = 5e-4 -> 50/60 degrees error
+
+learning_rate = 1e-4
+
+batch_size = 20
+lr = 2e-4error = 25
+# lr = 1e-4 -> err = 20
+
+lr = 2e-5 -> err = 15
+
+batch_size = 30
+lr = 2e-5 ->  err = 16
+lr = 1e-5 ->  err = 14
+lr = 2e-6 -> err = 30
+lr = 5e-6 -> err = 15
+
+
+=================
+optimizer = sgd
+batch_size = 30
+momentum=.9
+
+learning_rate = 1e-5 -> err = 80
+learning_rate = 1e-4 -> err = 15
+learning_rate = 2e-4 -> err = 14
+learning_rate = 5e-4 -> err = 14.5
+learning_rate = 1e-3 -> err = 20
+
+momentum = .99
+lr = 2e-4 -> err = 19
+lr = 1e-4 -> err = 18
+lr = 5e-5 -> err = 15
+lr = 2e-5 => err = 22
+
+momentum = .9
+nesterov = False
+
+lr = 1e-3 -> err = 15.5
+lr = 5e-4 -> err = 16
+lr = 2e-4 -> err = 13 / 14.5
+lr = 1e-4 -> err = 15
+lr = 5e-5 -> err = 23.5
+
+momentum = 0
+lr = 1e-1 -> err = 39
+lr = 2e-2 -> err = 17
+lr = 1e-2 -> err = 16
+lr = 5e-3 -> err = 15
+lr = 2e-3 -> err = 13.5
+lr = 1e-3 -> err = 17
+lr = 2e-4 -> err = 68
+lr = 1e-6 -> err = 82
+
+Bounding = Bounding.NONE
+lr = 1e-2 -> err = 77
+lr = 5e-3 -> err = 18.5 / 16.5
+lr = 2e-3 -> err = 20
+lr = 1e-3 -> err = 20
+
+===========
+
+angle_encoding = UNIT
+force_xy = True
+bounding = TANH
+
+optimizer = nadam
+batchsize = 30
+
+lr = 5e-3 -> err = 80
+lr = 1e-4 -> err = 30
+lr = 5e-5 -> err = 23.5
+lr = 2e-5 -> err = 21
+lr = 1e-5 -> err = 30
+lr = 5e-6 -> err = 40
+lr = 1e-6 -> err = 80
+
+bounding = NONE
+
+lr = 5e-3 -> err = 41.5
+lr = 2e-3 -> err = 18
+lr = 1e-3 -> err = 12.5
+lr = 5e-4 -> err = 18.5
+lr = 2e-4 -> err = 8     < ------------------------ BEST
+lr = 1e-4 -> err = 16.3
+lr = 5e-5 -> err = 18
+lr = 2e-5 -> err = 17
+lr = 1e-5 -> err = 32
+
+bounding = CLIP
+
+lr = 2e-4 -> err = 49.5
+lr = 1e-4 -> err = 36
+lr = 5e-5 -> err = 30
+lr = 2e-5 -> err = 26
+lr = 1e-5 -> err = 37
+lr = 5e-6 -> err = 43
+
+#@TODO: try bounding = NORM
+
+force_xy = False
+bounding = NONE
+
+lr = 2e-4 -> err = 85
+lr = 1e-4 -> err = 83
+lr = 1e-5 -> err = 70 / 60
+lr = 5e-6 -> err = 60
+lr = 2e-6 -> err = 74
+lr = 1e-6 -> err = 76
+
+bounding = TANH
+
+lr = 2e-4 -> err = 86
+lr = 1e-4 -> err = 83
+lr = 5e-5 -> err = 80
+lr = 2e-5 -> err = 58
+lr = 1e-5 -> err = 52
+lr = 5e-6 -> err = 58
+lr = 2e-6 -> err = 54
+lr = 1e-6 -> err = 81
+
+bounding = NORM
+
+batch_size = 1 (oom for batchsize = 5, 10, 20, 30)
+
+lr = 1e-3 -> err = nan
+lr = 2e-4 -> err = nan
+lr = 1e-6 -> err = nan
+
+===============
+
+angle_encoding = CLASSES
+force_xy = None
+bounding = None
+n_classes = 180 (resolution = 2 degrees)
+batch_size = 30
+lr = 2e-4 -> err = 0 (< 1 degree)
+
+n_classes = 360 (resolution = 1 degree)
+lr = 2e-4 -> err = 0 (< .5 degrees)
+
+n_classes = 720 (resolution = .25 degrees)
+lr = 2e-4 -> err = 0 (< .25 degrees)
+
+grayscale = True -> err = 0 (< .25 degrees)
+
+dataset_size = MEDIUM (1000 samples; previously, small = 100) -> err = 0 (< .25 degrees)
+
+img_side = 64 -> err = 0 (< .25 degrees)
+img_side = 32 -> err = 0 (< .25 degrees)
+img_side = 10 -> err = 0 (< .25 degrees)
+img_side = 5 -> err = 0 (< .25 degrees)
+img_side = 2 -> err = 4.16
+
+========================================
+========================================
+
+no_xval = False
+
+img_side = 5 -> err = 0, val_err = 51
+img_side = 10 -> err = 0, val_err = 60
+img_side = 32 -> err = 0, val_err = 63
+img_side = 64 -> err = 0, val_err = 68
+
+dropout = .5 -> err = 90, val_err = 86
+dropout = .3 -> err = 76, val_err = 75
+
+img_side = 96 -> err = 71, val_err = 77
+
+grayscale = False
+angle_encoding = UNIT
+force_xy = True
+n_classes = None
+bounding = NONE
+lr = 2e-4 -> err = 76, val_err = 85.5
+
+dropout = None
+l2 = 1e-3 -> err = 26, val_err = 72
+l2 = 5e-4 -> err = 12, val_err = 50
+l2 = 2e-4 -> err = 12, val_err = 42.5
+l2 = 1e-4 -> err = 11, val_err = 56
+l2 = 5e-5 -> err = 18, val_err = 58
+l2 = 1e-5 -> err = 12, val_err = 54
+l2 = 1e-6 -> err = 17, val_err = 57
+l2 = 1e-7 -> err = 28, val_err = 69
+l2 = 0 -> err = 11, val_err = 54.5
+
+l2 = 2e-4
+dropout = .1 -> err = 26, val_err = 41.5
+dropout = .2 -> err = 56, val_err = 71
+
+dropout = .1
+img_side = 128 -> err = 23, val_err = 48
+
+lr = 5e-4 -> err = 22, val_err = 22.5
+
+batch_size = 60 -> oom during epoch 2
+batch_size = 50 -> oom
+batch_size = 40 -> err = 19.5, val_err = 26.5
+
+reduce lr on train set metric decrease instead of xval set -> err = 15.5, val_err = 21.8
+
+lr = 1e-3 -> err = 17, val_err = 22
+lr = 2e-3 -> err = 32, val_err = 34.5
+
+lr = 5e-4
+dropout = .2 ->  err = 34, val_err = 31.5
+
+dropout = .1
+
+img_side = 256 -> oom (batch_size = 40)
+batch_size = 20 -> err=27, val_err=24.5  < --- LARGE MODEL BIAS ???
+
+batch_size = 30 -> oom
+batch_size = 25
+lr = 2e-3

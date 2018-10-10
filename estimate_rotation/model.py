@@ -11,11 +11,24 @@ from keras.applications.inception_v3 import preprocess_input as preproc_inceptio
 from keras.applications.vgg16 import preprocess_input as preproc_vgg
 from keras.applications.resnet50 import preprocess_input as preproc_resnet
 
-
-# from keras_applications.imagenet_utils import _obtain_input_shape
-
 from estimate_rotation.common import AngleEncoding
 
+if K.backend() == 'theano':
+    from theano.tensor import arctan2
+
+    def atan2(y, x):
+        out = arctan2(y, x)
+        if not hasattr(out, '__name__'):
+            # I don't know what it has any side-effects, but it seems to work
+            out.__name__ = 'varul_sandel'
+
+        return out
+elif K.backend() == 'tensorflow':
+    from tensorflow import atan2
+else:
+    raise NotImplementedError('backend ' + K.backend() + ' not supported')
+
+# from keras_applications.imagenet_utils import _obtain_input_shape
 
 @unique
 class Bounding(Enum):
@@ -169,21 +182,6 @@ def estimate_angle(angle_encoding, force_xy=None, bounding=None, n_classes=None,
 
     out_scale = None
     if force_xy:
-        if K.backend() == 'theano':
-            from theano.tensor import arctan2
-
-            def atan2(y, x):
-                out = arctan2(y, x)
-                if not hasattr(out, '__name__'):
-                    # I don't know what it has any side-effects, but it seems to work
-                    out.__name__ = 'varul_sandel'
-
-                return out
-        elif K.backend() == 'tensorflow':
-            from tensorflow import atan2
-        else:
-            raise NotImplementedError('backend ' + K.backend() + ' not supported')
-
         # output is always in -pi...pi (atan is applied in previous layer)
         if angle_encoding == AngleEncoding.UNIT:
             out_scale = 1 / math.pi

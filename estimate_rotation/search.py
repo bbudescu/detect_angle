@@ -56,7 +56,7 @@ def get_space(overfit):
     }
 
     untrained_features_space = {
-        'img_side': 158. / quniform('resolution degrees for img_side', .5, 2, .25),
+        'img_side': 158. / quniform('resolution degrees for img_side', .5, 5, .25),
         'grayscale': choice('convert to grayscale', [False, True]),
         'features': Features.TRAIN,
         'optimizer_kwargs': choice('optimizer kwargs', [
@@ -72,7 +72,10 @@ def get_space(overfit):
                 'nesterov': True,
                 'momentum': momentum_space
             }
-        ])
+        ]),
+        'convs_per_block': quniform('convs per block', 1, 2, 1),
+        'skip_layer_connections': choice('use shortcuts', [False, True]),
+        'stages': (1,)
     }
 
     pretrained_features_space = {
@@ -85,7 +88,10 @@ def get_space(overfit):
             'batch_size': 3 if backend == 'tensorflow' else 5,  # if we get here, backend == theano
             'nesterov': True,
             'momentum': momentum_space
-        }
+        },
+        'convs_per_block': None,
+        'skip_layer_connections': None,
+        'stages': (1, 2)  # TODO: remove stage 2 when using resnet/inception features (but test first on 1060, maybe they work...)
     }
 
     if backend == 'tensorflow':
@@ -133,8 +139,6 @@ def get_space(overfit):
         # 'decode_angle': False,
         'dropout': None if overfit else quniform('layer1_dropout_var', 0, 0.7, 0.1),
         'l2_penalty': 0 if overfit else 2 ** quniform('l2 penalty', -46, 0, 1),  # between 1e-14 and 1
-        'convs_per_block': quniform('convs per block', 1, 2, 1),
-        'skip_layer_connections': choice('use shortcuts', [False, True])
     }
 
     model_param_space.update(features_space)
@@ -144,12 +148,12 @@ def get_space(overfit):
     space = model_param_space.copy()
     space.update(training_param_space)
 
+    space['no_test'] = True
+
     if overfit:
         space['no_xval'] = True
-        space['no_test'] = True
     else:
         space['no_xval'] = False
-        space['no_test'] = False
 
     return space
 
@@ -171,7 +175,7 @@ def best_net(
         temp_net_filename, temp_preproc_filename, temp_stage_results_filename,
         dataset_dir, dataset_name=None, dataset_size=None, dataset_static=False, dataset_inmem=False,
         shuffle_train=True, seed=42, image_data_format=K.image_data_format(), cache_datasets=False,
-        preproc='default', min_epochs=3, max_epochs=50, stages=(1, 2, 3), retrain=False):
+        preproc='default', min_epochs=3, max_epochs=50, retrain=False):
     # from the search space we get:
     # no_xval, no_test,
     # features, img_side, resolution_degrees, grayscale, angle_encoding, force_xy, bounding, dropout,
@@ -201,8 +205,8 @@ def best_net(
                             args['img_side'], resolution_degrees, args['grayscale'], preproc, args['angle_encoding'],
                             args['force_xy'], args['bounding'], args['n_classes'], args['convs_per_block'],
                             args['skip_layer_connections'], args['dropout'], args['l2_penalty'], args['batch_size'],
-                            args['optimizer'], args['lr'], args['optimizer_kwargs'], min_epochs, max_epochs, stages,
-                            retrain)
+                            args['optimizer'], args['lr'], args['optimizer_kwargs'], min_epochs, max_epochs,
+                            args['stages'], retrain)
             except:
                 print('model training failed!')
                 traceback.print_exc()
@@ -226,7 +230,6 @@ def best_net(
                         'preproc': preproc,
                         'min_epochs': min_epochs,
                         'max_epochs': max_epochs,
-                        'stages': stages,
                         'retrain': retrain
                     })
 
@@ -308,18 +311,17 @@ def main():
     min_epochs = 1
     max_epochs = 10
 
-    stages = (1, 2, 3)
     retrain = False
 
     overfit = False
-    max_evals = 100
+    max_evals = 200
     overwrite_trials = True
 
     best_args = best_net(best_net_filename, best_preproc_filename, best_args_filename, best_stage_results_filename,
                          overfit, max_evals, trials_filename, overwrite_trials, temp_net_filename,
                          temp_preproc_filename, temp_stage_results_filename, dataset_dir, dataset_name, dataset_size,
                          dataset_static, dataset_inmem, shuffle_train, seed, image_data_format, cache_dataset, preproc,
-                         min_epochs, max_epochs, stages, retrain)
+                         min_epochs, max_epochs, retrain)
 
     print('best:')
     print(best_args)

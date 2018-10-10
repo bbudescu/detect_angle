@@ -19,12 +19,14 @@ def main():
     # - a file rot.csv containing <filename, angle> information on each line
     # each set will also be saved in numpy format
     dirs = [
-        '/home/bogdan/work/visionsemantics/data/coco_tiny',
+        # '/home/bogdan/work/visionsemantics/data/coco_tiny',
         # '/home/bogdan/work/visionsemantics/data/coco_small',
         # '/home/bogdan/work/visionsemantics/data/coco_medium'
+        '/home/bogdan/work/visionsemantics/data/coco_large'
     ]
 
-    batch_sizes = [5, 10, 10]
+    # batch_sizes = [5, 10, 10, 10]
+    batch_sizes = [10]
 
     # we choose the same parameters as during training
     resolution_degrees = .5
@@ -44,11 +46,11 @@ def main():
 
             generate_static(in_subdir, static_subdir, img_side, batch_size)
 
-            [imgs, rots], angles = load_as_nparr(static_subdir)
+            # [imgs, rots], angles = load_as_nparr(static_subdir, img_side, grayscale=False)
 
-            numpy.save(static_subdir + '_img.npy', imgs)
-            numpy.save(static_subdir + '_rot.npy', rots)
-            numpy.save(static_subdir + '_angles.npy', angles)
+            # numpy.save(static_subdir + '_img.npy', imgs)
+            # numpy.save(static_subdir + '_rot.npy', rots)
+            # numpy.save(static_subdir + '_angles.npy', angles)
 
 
 if __name__ == '__main__':

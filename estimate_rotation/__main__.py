@@ -2,6 +2,7 @@ import argparse
 import os
 import numpy
 import pickle
+import platform
 
 
 def get_args():
@@ -43,6 +44,7 @@ def get_args():
 
 
 def load_and_preproc(img_filename, grayscale, img_side, preproc):
+
     from keras.preprocessing.image import load_img
     from estimate_rotation.util import zoom_square
 
@@ -63,18 +65,31 @@ def load_and_preproc(img_filename, grayscale, img_side, preproc):
 
 
 def test(net_filename, preproc_filename, img_filename, rot_filename):
+    # from estimate_rotation import config
+    # config.keras('theano', platform.node())
     from keras.models import load_model
     from estimate_rotation.util import decode_angle
+    from estimate_rotation.model import atan2
     from keras import backend as K
 
-    with open(preproc_filename, 'rb') as preproc_file:
-        preproc_dict = pickle.load(preproc_file)
+    from estimate_rotation.model import model as get_model, Features, Bounding
+    from estimate_rotation.common import AngleEncoding
 
-    model = load_model(net_filename, compile=False)
+    model, _ = get_model(Features.TRAIN, img_side=256, grayscale=False, angle_encoding=AngleEncoding.UNIT, force_xy=True,
+                         bounding=Bounding.NONE, n_classes=None, convs_per_block=1, skip_layer_connections=False,
+                         dropout=.1, l2_penalty=2e-4, decode_angle=False)
+
+    model.load_weights(net_filename)
     model.save(net_filename, include_optimizer=False)
+
+    model = load_model(net_filename, compile=False, custom_objects={'atan2': atan2})
+    # model.save(net_filename, include_optimizer=False)
 
     grayscale = model.input_shape[0][1 if K.image_data_format() == 'channels_first' else -1] == 1
     img_side = model.input_shape[0][-2]
+
+    with open(preproc_filename, 'rb') as preproc_file:
+        preproc_dict = pickle.load(preproc_file)
 
     preproc = preproc_dict['preproc']
     angle_encoding = preproc_dict['angle_encoding']

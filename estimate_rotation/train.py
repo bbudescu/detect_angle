@@ -169,7 +169,7 @@ def do_training(
 
     if angle_encoding == AngleEncoding.CLASSES:
         loss = categorical_crossentropy
-        loss_epsilon = .005  # hardcoded
+        # loss_epsilon = .005  # hardcoded
     else:
         if angle_encoding == AngleEncoding.SINCOS:
             loss = mse
@@ -186,20 +186,27 @@ def do_training(
 
         one_degree_diff = diff_range[angle_encoding] / 360.
         diff_epsilon = one_degree_diff * metric_epsilon
-        loss_epsilon = diff_epsilon ** 2  # we use mean SQUARE error
+        # loss_epsilon = diff_epsilon ** 2  # we use mean SQUARE error
 
+    train_monitor = val_monitor = metric_name
     if val_set:
-        metric_name = 'val_' + metric_name
+        val_monitor = 'val_' + val_monitor
 
     model.compile(optimizer=optimizer, loss=loss, metrics=[metric])
+
+    reduce_lr_cooldown = 1
+    reduce_lr_patience = 2
+
+    early_stopping_patience = (reduce_lr_cooldown + reduce_lr_patience) * 2 + 1
 
     # @TODO: for a real life scenario: create our own EarlyStopping implementation that supports decisions based on
     #        relative improvement, and that increases patience proportionally with the number of epochs so far; also,
     #        a minimum number of epochs should be allowed as param
-    early_stopping = EarlyStopping(metric_name, min_delta=metric_epsilon, patience=3, verbose=1)
-    model_checkpoint = LossSavingModelCheckpoint(net_filename, metric_name, verbose=1, save_best_only=True)
-    lr_schedule = ReduceLROnPlateau(metric_name, factor=0.5, patience=2, verbose=1, mode='min',
-                                    min_delta=metric_epsilon, cooldown=2, min_lr=1e-12)
+    early_stopping = EarlyStopping(val_monitor, min_delta=metric_epsilon, patience=early_stopping_patience, verbose=1)
+    model_checkpoint = LossSavingModelCheckpoint(net_filename, val_monitor, verbose=1, save_best_only=True)
+
+    lr_schedule = ReduceLROnPlateau(train_monitor, factor=0.5, patience=reduce_lr_patience, verbose=1, mode='min',
+                                    min_delta=metric_epsilon, cooldown=reduce_lr_cooldown, min_lr=1e-12)
 
     if 1 not in stages:
         retrain = True
@@ -220,7 +227,7 @@ def do_training(
             best_file.write(str(model_checkpoint.best) + '\n')
             best_file.write(str(model_checkpoint.loss_at_best) + '\n')
 
-    print(metric_name, ':', model_checkpoint.best)
+    print(val_monitor, ':', model_checkpoint.best)
 
     # load net with best xval
     model.load_weights(net_filename)
@@ -241,7 +248,7 @@ def do_training(
             gc.collect()  # shouldn't be necessary
 
         # # reset learning rate for optimizer (ReduceLROnPlateau callback might have modified it)
-        # K.set_value(model.optimizer.lr, lr)
+        K.set_value(model.optimizer.lr, lr)
         #
         # # we need to recompile the model after thawing the weights
         # model.compile(optimizer=model.optimizer, loss=loss, metrics=[metric])
@@ -257,7 +264,7 @@ def do_training(
         model.load_weights(net_filename)
 
         print('after tuning the feature extractor')
-        print(metric_name, ':', model_checkpoint.best)
+        print(val_monitor, ':', model_checkpoint.best)
         test_session(model, data_inmem, batch_size, test_set)
 
     # train on both train and xval combined
@@ -286,9 +293,11 @@ def do_training(
         batch_eval_freq = max(batches_per_epoch // 5, 1)
         good_enough = GoodEnough(full_train_set, batch_size, data_inmem, 'loss', batch_eval_freq,
                                  model_checkpoint.loss_at_best)
-        early_stopping = EarlyStopping('loss', min_delta=loss_epsilon, patience=3, verbose=1)
-        lr_schedule = ReduceLROnPlateau('loss', factor=0.5, patience=2, verbose=1, mode='min', min_delta=loss_epsilon,
-                                        cooldown=2, min_lr=1e-12)
+        early_stopping = EarlyStopping(train_monitor, min_delta=metric_epsilon, patience=early_stopping_patience,
+                                       verbose=1)
+        lr_schedule = ReduceLROnPlateau(train_monitor, factor=0.5, patience=reduce_lr_patience, verbose=1,
+                                        mode='min', min_delta=metric_epsilon, cooldown=reduce_lr_cooldown,
+                                        min_lr=1e-12)
 
         # reset learning rate for optimizer (ReduceLROnPlateau callback might have modified it)
         K.set_value(model.optimizer.lr, lr)
@@ -354,7 +363,7 @@ def train(
     train_set, val_set, test_set = datasets(dataset_dir, dataset_name, dataset_size, dataset_static, dataset_inmem,
                                             img_side, grayscale, preproc, angle_encoding, n_classes, batch_size,
                                             shuffle_train, seed, image_data_format,
-                                            no_test, no_xval, cache_datasets)
+                                            no_xval, no_test, cache_datasets)
 
     if retrain:
         rot_predictor = load_model(net_filename, compile=False)
@@ -380,9 +389,18 @@ def train(
         from estimate_rotation.util import decode_angle
         if not dataset_inmem:
             raise NotImplementedError()
-        test_predictions = model.predict(test_set[0], batch_size, verbose=1)
+
+        if test_set is not None:
+            dataset = test_set
+        elif val_set is not None:
+            dataset = val_set
+        else:
+            dataset = train_set
+
+        predictions = model.predict(dataset[0], batch_size, verbose=1)
+        ground_truth = dataset[1]
         print('ground truth, prediction, diff')
-        for pred, gt in zip(test_predictions, test_set[1]):
+        for pred, gt in zip(predictions, ground_truth):
             pred = decode_angle(pred, angle_encoding)
             gt = decode_angle(gt, angle_encoding)
 
@@ -397,13 +415,16 @@ def main():
 
     assert K.image_data_format() == 'channels_first'
 
+    hostname = platform.node()
+    assert hostname in {'mirel', 'nicu'}
+
     # playground for training various models
 
     # user params
     resolution_degrees = None
     dataset_dir = os.path.expanduser('~/work/visionsemantics/data/')
     dataset_name = 'coco'
-    dataset_size = DatasetSize.TINY
+    dataset_size = DatasetSize.MEDIUM
     dataset_static = True
     dataset_inmem = True
 
@@ -418,32 +439,8 @@ def main():
     no_test = False
     retrain = False
     # stages = (1, 2, 3,)
-    stages = (1, 2, 3)
+    stages = tuple()
     # ~user params
-
-    # metaparams
-    features = Features.TRAIN
-    grayscale = False
-    angle_encoding = AngleEncoding.UNIT
-    force_xy = True
-    n_classes = None
-    bounding = Bounding.TANH
-    dropout = None
-    l2_penalty = 1e-4
-    img_side = 120
-
-    convs_per_block = 1
-    skip_layer_connections = False
-
-    min_epochs = 1
-    max_epochs = 2
-    learning_rate = 1e-4
-    optimizer = nadam
-    # optimizer = sgd
-    # ~metaparams
-
-    hostname = platform.node()
-    assert hostname in {'mirel', 'nicu'}
 
     # laptop:
     #     tf:
@@ -452,12 +449,12 @@ def main():
     #             nadam: max batch size = 1
     #         [vgg16, resnet50, inception_v3] (img_size=224), [nadam, sgd]: fails with batch size=1 in stage 1
     #     theano:
-    #         no_pretrain, resolution_degrees=.5 (img_size=316):
+    #         no_pretrain, img_size=316:
     #             nadam: max batch size = 5
     #             sgd: max batch size = 7
     #         vgg16 (img_size=224):
-    #             sgd: works with batch size = 5
-    #             nadam: oom with batch size = 1 in stage 2
+    #             sgd: oom with batch size = 1
+    #             nadam: oom with batch size = 1
     #         resnet50 (img_size=224):
     #             sgd: oom with batch size = 1
     #             nadam: oom with batch size = 1
@@ -469,22 +466,49 @@ def main():
     #     tf: doesn't work at all
     #     theano: not yet explored. We'll just use the same batch sizes as on the laptop, although the desktop has
     #             twice the memory.
+    #             not sure, but I think I did a bunch of tests, and vgg16 worked with batch_size = 5 (sgd), and
+    #             batch_size = 1 with nadam (first stage only)
 
-    if K.backend() == 'tensorflow':
-        if optimizer == nadam:
-            batch_size = 1
-        else:
-            batch_size = 3
-    elif K.backend() == 'theano':
-        if optimizer == nadam:
-            batch_size = 3
-        else:
-            batch_size = 5
+    # metaparams
+    features = Features.TRAIN
+    grayscale = False
+    angle_encoding = AngleEncoding.UNIT
+    force_xy = True
+    n_classes = None
+    bounding = Bounding.NONE
+    dropout = .1
+    l2_penalty = 2e-4
+    img_side = 256
+
+    convs_per_block = 1
+    skip_layer_connections = False
+
+    min_epochs = 0
+    max_epochs = 100
+
+    learning_rate = 2e-3
+
+    optimizer = nadam
+
+    batch_size = 25
+
+    # if K.backend() == 'tensorflow':
+    #     if optimizer == nadam:
+    #         batch_size = 1
+    #     else:
+    #         batch_size = 3
+    # elif K.backend() == 'theano':
+    #     if optimizer == nadam:
+    #         batch_size = 3
+    #     else:
+    #         batch_size = 5
+
+    # ~metaparams
 
     optimizer_kwargs = {}
     if optimizer == sgd:
-        optimizer_kwargs['momentum'] = .5
-        optimizer_kwargs['nesterov'] = True
+        optimizer_kwargs['momentum'] = 0
+        optimizer_kwargs['nesterov'] = False
 
     train(net_filename, preproc_filename, stage_results_filename, dataset_dir, dataset_name, dataset_size,
           dataset_static, dataset_inmem,
